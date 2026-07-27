@@ -1,0 +1,430 @@
+"""Native TTS worker: claims queued jobs from Postgres and runs the pipeline.
+
+Runs on the host directly (never in Docker — MPS does not pass through).
+
+Chapter audio is cached under <DATA_DIR>/work/<job-id>/ and reused whenever a
+job runs again, so a failed, cancelled, or re-assembled job never re-narrates
+audio it already has.
+"""
+
+import hashlib
+import logging
+import signal
+import time
+import traceback
+
+import psycopg
+from psycopg.rows import dict_row
+
+from vocalis_core.epub_parse import parse_epub
+from vocalis_core.text_clean import clean_text, chunk_text
+
+from . import config
+from .assemble import assemble_m4b
+from .identity import describe, refresh
+from .pool import Cancelled, ChapterPool, cached_seconds
+
+log = logging.getLogger("vocalis.worker")
+
+# Progress bands: parsing 0–5, synthesis 5–95, assembly 95–100.
+PARSE_DONE, SYNTH_DONE = 5.0, 95.0
+
+# Chunks of the first selected chapter to narrate for an audition. Six ran
+# ~2 minutes of audio; three keeps the wait near a minute, which is enough to
+# judge a voice.
+SAMPLE_CHUNKS = 3
+
+
+def connect() -> psycopg.Connection:
+    return psycopg.connect(config.DATABASE_URL, row_factory=dict_row, autocommit=True)
+
+
+def claim_job(conn: psycopg.Connection):
+    return conn.execute(
+        """
+        UPDATE jobs
+        SET status = 'parsing', started_at = now(), updated_at = now(),
+            cancel_requested = false,
+            -- A resumed job inherits an estimate measured on a different run,
+            -- at a different concurrency, over work it no longer has to do.
+            -- Better to show nothing until this run measures its own rate.
+            estimated_total_seconds = NULL
+        WHERE id = (
+            SELECT id FROM jobs WHERE status = 'queued'
+            ORDER BY created_at
+            FOR UPDATE SKIP LOCKED
+            LIMIT 1
+        )
+        RETURNING id, epub_path, voice_ref_path, seed, tts_params, mode, chapters,
+                  concurrency, drop_citations, work_seconds
+        """
+    ).fetchone()
+
+
+def requeue_orphans(conn: psycopg.Connection) -> None:
+    """Re-queue jobs left mid-flight by a crash, reboot, or kill.
+
+    Those jobs still say 'synthesizing' but no worker owns them any more, so
+    without this they would sit stranded forever. Cached chapters mean the
+    retry costs nothing for work already done.
+
+    Only correct because Vocalis runs a single worker — with more than one,
+    this would steal a live job from its owner and needs a lease/heartbeat.
+    """
+    rows = conn.execute(
+        """
+        UPDATE jobs
+        SET status = 'queued', cancel_requested = false, updated_at = now()
+        WHERE status IN ('parsing', 'synthesizing', 'assembling')
+        RETURNING id
+        """
+    ).fetchall()
+    for row in rows:
+        log.info("Re-queued %s, interrupted by a restart", row["id"])
+
+
+def heartbeat(conn: psycopg.Connection) -> None:
+    """Record that this worker is alive, and what hardware it is using.
+
+    Runs every poll so the setup page can distinguish a connected narrator from
+    a stopped one; the API treats a row older than a couple of poll intervals as
+    offline.
+    """
+    w = describe()
+    conn.execute(
+        """
+        INSERT INTO workers
+            (id, hostname, device, device_name, free_gpu_gb, max_concurrency,
+             version, last_seen)
+        VALUES (%(id)s, %(hostname)s, %(device)s, %(device_name)s,
+                %(free_gpu_gb)s, %(max_concurrency)s, %(version)s, now())
+        ON CONFLICT (id) DO UPDATE SET
+            hostname = EXCLUDED.hostname, device = EXCLUDED.device,
+            device_name = EXCLUDED.device_name,
+            free_gpu_gb = EXCLUDED.free_gpu_gb,
+            max_concurrency = EXCLUDED.max_concurrency,
+            version = EXCLUDED.version, last_seen = now()
+        """,
+        w,
+    )
+
+
+def update(conn: psycopg.Connection, job_id, **fields) -> None:
+    sets = ", ".join(f"{k} = %s" for k in fields)
+    conn.execute(
+        f"UPDATE jobs SET {sets}, updated_at = now() WHERE id = %s",
+        (*fields.values(), job_id),
+    )
+
+
+def apply_plan(book, plan):
+    """Filter and rename parsed chapters using the reviewed plan.
+
+    Returns (chapters, original_indexes) so cached audio keeps stable
+    filenames even when the selection changes between runs.
+    """
+    if not plan:
+        return book.chapters, list(range(len(book.chapters)))
+
+    by_index = {entry["index"]: entry for entry in plan}
+    chapters, indexes = [], []
+    for i, chapter in enumerate(book.chapters):
+        entry = by_index.get(i)
+        if entry is not None and not entry.get("include", True):
+            continue
+        if entry and entry.get("title"):
+            chapter.title = entry["title"]
+        chapters.append(chapter)
+        indexes.append(i)
+    return chapters, indexes
+
+
+def _drop_restaled_audio(work_dir, prefix: str, original: int,
+                         chunks: list[str], size: int) -> None:
+    """Discard a chapter's cached segments when the text was re-chunked.
+
+    A segment file holds the audio for a particular span of chunks. Change how
+    text is split into chunks — a sentence-splitter fix, a different
+    MAX_CHUNK_CHARS — and segment 3 now covers different words than the file
+    named segment 3 contains. Reusing it silently duplicates or drops a
+    sentence, which is worse than the cost of re-narrating the chapter, and
+    invisible until someone listens.
+
+    Books cached before this existed carry no signature, so there are three
+    checks rather than one:
+
+    * the recorded fingerprint no longer matches the chunk texts;
+    * a segment numbered beyond what the current chunking produces — a chapter
+      that needed eight segments and now needs seven would otherwise lose its
+      tail;
+    * an unsigned chapter that is only *partly* rendered. A complete one is
+      internally consistent whatever chunking produced it, and is worth
+      keeping; a partial one would have its finished segments joined to new
+      ones cut at different boundaries, which is the case that actually
+      duplicates or drops a sentence.
+    """
+    signature = hashlib.sha256("\x00".join(chunks).encode()).hexdigest()[:16]
+    sig_path = work_dir / f"{prefix}_{original:04d}.chunks"
+    expected_parts = -(-len(chunks) // size)  # ceil
+
+    present = set()
+    for path in work_dir.glob(f"{prefix}_{original:04d}_*.wav"):
+        tail = path.stem.rsplit("_", 1)[-1]
+        if tail.isdigit():
+            present.add(int(tail))
+
+    if sig_path.is_file():
+        stale = sig_path.read_text().strip() != signature
+    else:
+        # Unsigned: trust it only if it is a complete chapter.
+        stale = bool(present) and present != set(range(expected_parts))
+    if not stale:
+        stale = any(part >= expected_parts for part in present)
+
+    if stale:
+        removed = 0
+        for path in work_dir.glob(f"{prefix}_{original:04d}_*.wav"):
+            path.unlink(missing_ok=True)
+            removed += 1
+        log.info("Chapter %d was re-chunked; dropped %d stale segment(s)",
+                 original, removed)
+    sig_path.write_text(signature)
+
+
+def process_job(conn: psycopg.Connection, job) -> None:
+    job_id = job["id"]
+    is_sample = job["mode"] == "sample"
+    log.info("Processing %s job %s", job["mode"], job_id)
+
+    epub_path = config.DATA_DIR / job["epub_path"]
+    voice_ref = config.DATA_DIR / job["voice_ref_path"] if job["voice_ref_path"] else None
+    work_dir = config.DATA_DIR / f"work/{job_id}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    book = parse_epub(epub_path)
+    if not book.chapters:
+        raise RuntimeError("no synthesizable chapters found in EPUB")
+
+    chapters, indexes = apply_plan(book, job.get("chapters"))
+    if not chapters:
+        raise RuntimeError("the chapter plan excluded every section")
+    if is_sample:
+        chapters, indexes = chapters[:1], indexes[:1]
+
+    drop_citations = bool(job.get("drop_citations"))
+    chapter_chunks = [
+        chunk_text(clean_text(c.text, drop_citations=drop_citations), config.MAX_CHUNK_CHARS)
+        for c in chapters
+    ]
+    if is_sample:
+        chapter_chunks = [chapter_chunks[0][:SAMPLE_CHUNKS]]
+
+    prefix = "sample" if is_sample else "chapter"
+    params = job.get("tts_params") or {}
+
+    cover_path = None
+    if book.cover:
+        cover_path = work_dir / f"cover{book.cover_ext}"
+        cover_path.write_bytes(book.cover)
+
+    # Each chapter renders as one or more fixed-size segments, so a process's
+    # lifetime is bounded by chunks rather than by chapters — see
+    # pool.SEGMENTS_PER_PROCESS. A book with 40k-character chapters would
+    # otherwise hand a single process more work than its GPU graph cache can
+    # survive.
+    segments: list[list[tuple[Path, list[str] | None]]] = []
+    for original, chunks in zip(indexes, chapter_chunks):
+        whole = work_dir / f"{prefix}_{original:04d}.wav"
+        if cached_seconds(whole) is not None:
+            # Rendered before segmenting existed. Keep it: re-narrating a
+            # cached chapter to change its filename would be hours wasted.
+            segments.append([(whole, None)])
+            continue
+        size = max(1, config.SEGMENT_CHUNKS)
+        _drop_restaled_audio(work_dir, prefix, original, chunks, size)
+        segments.append([
+            (work_dir / f"{prefix}_{original:04d}_{i // size:03d}.wav", chunks[i:i + size])
+            for i in range(0, len(chunks), size)
+        ])
+
+    # Reuse anything already rendered; only the rest costs GPU time.
+    seg_seconds: dict[tuple[int, int], float] = {}
+    todo = []
+    for position, units in enumerate(segments):
+        for part, (path, chunks) in enumerate(units):
+            cached = cached_seconds(path)
+            if cached is not None:
+                seg_seconds[(position, part)] = cached
+            elif chunks:
+                # Every segment but a chapter's last ends with the same pause
+                # that separates chunks, so joining them is seamless.
+                trailing = part < len(units) - 1
+                todo.append((
+                    (position, part), chunks, voice_ref, job["seed"], path,
+                    params, trailing,
+                ))
+
+    def chapter_done(position: int) -> bool:
+        return all((position, p) in seg_seconds for p in range(len(segments[position])))
+
+    def chapters_complete() -> int:
+        return sum(chapter_done(p) for p in range(len(segments)))
+
+    # Measure GPU headroom now rather than trusting a reading from worker
+    # startup: what is free depends on whatever else the desktop is running,
+    # and that changes over the hours between login and this book. Samples are
+    # short and always single-process, so they skip the probe.
+    free_gpu_gb = None
+    if not is_sample:
+        free_gpu_gb = refresh().get("free_gpu_gb")
+    concurrency = 1 if is_sample else max(1, job.get("concurrency") or 1)
+    total_chars = sum(sum(len(c) for c in chunks) for chunks in chapter_chunks) or 1
+    todo_chars = sum(sum(len(c) for c in t[1]) for t in todo) or 1
+
+    update(
+        conn, job_id,
+        status="synthesizing", title=book.title, author=book.author,
+        chapter_count=len(chapters), chapters_done=chapters_complete(),
+        progress=PARSE_DONE
+        + (SYNTH_DONE - PARSE_DONE) * (total_chars - todo_chars) / total_chars,
+    )
+    log.info(
+        "%d/%d chapters cached; narrating %d segment(s) with concurrency %d",
+        chapters_complete(), len(chapters), len(todo), concurrency,
+    )
+
+    # Time already banked by earlier runs of this job. Every run adds to it
+    # rather than replacing it, so "converted in" reports the whole effort
+    # instead of whatever was left after the last crash.
+    work_base = float(job.get("work_seconds") or 0.0)
+    run_started = time.monotonic()
+
+    if todo:
+        started = run_started
+        done_chars = 0
+
+        def cancelled() -> bool:
+            # The pool calls this every couple of seconds while rendering, which
+            # makes it the one place that reliably runs *during* a long chapter.
+            # Heartbeat here too, or a worker mid-book (minutes between job-loop
+            # iterations) would read as offline on the setup page.
+            heartbeat(conn)
+            return bool(
+                conn.execute(
+                    "SELECT cancel_requested FROM jobs WHERE id = %s", (job_id,)
+                ).fetchone()["cancel_requested"]
+            )
+
+        def on_done(key: tuple[int, int], duration: float) -> None:
+            nonlocal done_chars
+            position, part = key
+            seg_seconds[key] = duration
+            done_chars += sum(len(c) for c in segments[position][part][1] or ())
+            # Only announce a chapter once every one of its segments has landed;
+            # a half-rendered chapter is not progress the reader can use.
+            if chapter_done(position):
+                log.info("Finished %s (%d/%d)", chapters[position].title,
+                         chapters_complete(), len(chapters))
+            elapsed = time.monotonic() - started
+            # Project over the work actually left to do, then add what is
+            # already on disk — cached audio costs no time.
+            update(
+                conn, job_id,
+                chapters_done=chapters_complete(),
+                progress=PARSE_DONE
+                + (SYNTH_DONE - PARSE_DONE)
+                * (total_chars - todo_chars + done_chars) / total_chars,
+                estimated_total_seconds=elapsed / done_chars * todo_chars,
+                # Banked as we go: a crash then loses one chapter's worth of
+                # tally, not the run's.
+                work_seconds=work_base + elapsed,
+            )
+
+        with ChapterPool(concurrency, free_gpu_gb) as pool:
+            pool.render(todo, on_done, cancelled)
+
+    update(conn, job_id, status="assembling", progress=SYNTH_DONE)
+    # ffmpeg concatenates the segments in order, so a chapter's mark spans the
+    # sum of its segments — the listener sees chapters, not the split.
+    paths = [path for units in segments for path, _ in units]
+    chapter_meta = [
+        (
+            chapters[position].title,
+            sum(seg_seconds[(position, part)] for part in range(len(units))),
+        )
+        for position, units in enumerate(segments)
+    ]
+
+    if is_sample:
+        out_path = config.DATA_DIR / "output" / str(job_id) / "sample.wav"
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_bytes(paths[0].read_bytes())
+    else:
+        out_path = config.DATA_DIR / "output" / str(job_id) / "book.m4b"
+        assemble_m4b(paths, chapter_meta, book.title, book.author, cover_path,
+                     work_dir, out_path)
+
+    update(
+        conn, job_id,
+        status="done", progress=100.0,
+        output_path=str(out_path.relative_to(config.DATA_DIR)),
+        # The M4B is a straight concatenation, so the chapter durations sum to
+        # its playing time exactly.
+        audio_seconds=sum(seg_seconds.values()),
+        work_seconds=work_base + (time.monotonic() - run_started),
+    )
+    conn.execute("UPDATE jobs SET finished_at = now() WHERE id = %s", (job_id,))
+    log.info("Job %s done -> %s", job_id, out_path)
+
+
+def _exit_on_sigterm(signum, frame):
+    """Turn SIGTERM into a normal unwind so the pool children go with us.
+
+    Python's default SIGTERM handling stops the interpreter without running
+    atexit handlers or context managers, which leaves the spawned render
+    processes orphaned — they keep holding the GPU and finish chapters whose
+    results nobody is listening for. Raising SystemExit instead runs
+    ChapterPool.__exit__ on the way out, terminating them.
+
+    SystemExit is a BaseException, so the `except Exception` around
+    process_job deliberately does not catch it. The job stays 'synthesizing'
+    and requeue_orphans() picks it up on the next start.
+    """
+    log.info("Received signal %s, stopping", signum)
+    raise SystemExit(0)
+
+
+def run() -> None:
+    logging.basicConfig(level=logging.INFO,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    signal.signal(signal.SIGTERM, _exit_on_sigterm)
+    log.info("Worker ready (data=%s)", config.DATA_DIR)
+
+    startup = True
+    while True:
+        try:
+            with connect() as conn:
+                if startup:
+                    requeue_orphans(conn)
+                    startup = False
+                heartbeat(conn)
+                job = claim_job(conn)
+                if job is None:
+                    time.sleep(config.POLL_INTERVAL_SECONDS)
+                    continue
+                try:
+                    process_job(conn, job)
+                except Cancelled:
+                    log.info("Job %s cancelled; finished chapters kept", job["id"])
+                    update(conn, job["id"], status="cancelled", cancel_requested=False)
+                except Exception:
+                    log.exception("Job %s failed", job["id"])
+                    update(conn, job["id"], status="failed",
+                           error=traceback.format_exc()[-4000:])
+        except psycopg.OperationalError as exc:
+            log.warning("Database unavailable (%s), retrying in 10s", exc)
+            time.sleep(10)
+
+
+if __name__ == "__main__":
+    run()

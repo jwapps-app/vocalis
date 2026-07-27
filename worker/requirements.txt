@@ -1,0 +1,11 @@
+# Native worker — install on the host itself (not Docker) so torch gets
+# the Metal (MPS) backend. ffmpeg must be on PATH (brew install ffmpeg).
+#
+# EPUB parsing lives in ../core (shared with the API); install it editable:
+#   uv pip install -e ../core
+chatterbox-tts
+# chatterbox's watermarker (perth) needs pkg_resources, removed in setuptools 81+.
+setuptools<81
+torch
+torchaudio
+psycopg[binary]==3.2.*

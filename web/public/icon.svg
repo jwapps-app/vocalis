@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Vocalis">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#6366f1"/>
+      <stop offset="1" stop-color="#4338ca"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="64" height="64" rx="14" fill="url(#bg)"/>
+
+  <!-- Sound rising from the book -->
+  <g fill="none" stroke="#ffffff" stroke-linecap="round" opacity="0.9">
+    <path d="M23.3 25.0 A10 10 0 0 1 40.7 25.0" stroke-width="4"/>
+    <path d="M17.6 21.5 A16.5 16.5 0 0 1 46.4 21.5" stroke-width="3.6" opacity="0.6"/>
+  </g>
+
+  <!-- Open book -->
+  <g fill="#ffffff">
+    <path d="M32 35.5 C27 31.5 20 30.2 13.5 31.2 A1.5 1.5 0 0 0 12.2 32.7 L12.2 47.6 A1.5 1.5 0 0 0 14 49.1 C19.6 48.2 26.6 49.3 31 52.6 A1.6 1.6 0 0 0 32 52.9 Z"/>
+    <path d="M32 35.5 C37 31.5 44 30.2 50.5 31.2 A1.5 1.5 0 0 1 51.8 32.7 L51.8 47.6 A1.5 1.5 0 0 1 50 49.1 C44.4 48.2 37.4 49.3 33 52.6 A1.6 1.6 0 0 1 32 52.9 Z" opacity="0.82"/>
+  </g>
+</svg>

@@ -1,0 +1,30 @@
+# Secrets
+.env
+
+# Uploaded books, cached chapter audio, finished audiobooks, narrator clips.
+# Never commit: these are copyrighted works plus gigabytes of scratch audio.
+data/
+
+# Books or audio left anywhere else in the tree
+*.epub
+*.m4b
+*.wav
+*.mp3
+*.m4a
+
+# Editor and tooling state
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# Node and build output
+node_modules/
+web/dist/
+
+*.log
+.DS_Store

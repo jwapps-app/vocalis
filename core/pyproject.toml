@@ -1,0 +1,17 @@
+[project]
+name = "vocalis-core"
+version = "0.1.0"
+description = "EPUB parsing and text preparation shared by the Vocalis API and TTS worker."
+requires-python = ">=3.11"
+dependencies = [
+    "ebooklib",
+    "beautifulsoup4",
+    "lxml",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["vocalis_core"]

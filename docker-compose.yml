@@ -1,0 +1,48 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: vocalis
+      POSTGRES_USER: vocalis
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — see .env.example}
+    ports:
+      # Exposed on localhost so the native TTS worker on the host can
+      # connect. Host port 5445 — 5432/33/34/36/42 are taken by other fleet DBs.
+      - "127.0.0.1:5445:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vocalis -d vocalis"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+    environment:
+      DATABASE_URL: postgresql://vocalis:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — see .env.example}@db:5432/vocalis
+      DATA_DIR: /data
+      # Address the GPU machine uses to reach Postgres, baked into the worker
+      # bundle the setup page hands out. Default suits a worker on this same
+      # Mac; set to the server's LAN address for a worker on another machine.
+      WORKER_DB_HOSTPORT: ${WORKER_DB_HOSTPORT:-127.0.0.1:5445}
+    volumes:
+      # Same directory the native worker uses via VOCALIS_DATA_DIR.
+      - ${VOCALIS_DATA_DIR:-./data}:/data
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build: ./web
+    ports:
+      # 8080/8083–8090 are taken by other fleet services.
+      - "8091:80"
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

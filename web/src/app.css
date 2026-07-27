@@ -1,0 +1,1123 @@
+:root {
+  --brand: #4f46e5;
+  --brand-light: #6366f1;
+  --brand-dark: #4338ca;
+
+  --bg: #f6f7fb;
+  --bg-accent: #eceefb;
+  --surface: #ffffff;
+  --surface-sunken: #f8f9fc;
+  --text: #16182b;
+  --muted: #6b7089;
+  --border: #e3e5ef;
+  --shadow: 0 1px 2px rgba(22, 24, 43, 0.05), 0 8px 24px -12px rgba(22, 24, 43, 0.18);
+
+  --ok: #15803d;
+  --ok-bg: #dcfce7;
+  --err: #dc2626;
+  --err-bg: #fee2e2;
+  --wait-bg: #eceefb;
+
+  color-scheme: light dark;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0f1018;
+    --bg-accent: #16182a;
+    --surface: #191b28;
+    --surface-sunken: #14161f;
+    --text: #eceef5;
+    --muted: #969bb3;
+    --border: #2a2d3f;
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.4), 0 8px 24px -12px rgba(0, 0, 0, 0.7);
+
+    --ok: #4ade80;
+    --ok-bg: #14351f;
+    --err: #f87171;
+    --err-bg: #3a1a1a;
+    --wait-bg: #22243a;
+  }
+}
+
+* {
+  box-sizing: border-box;
+}
+
+/* Every single-column grid in this file, capped.
+ *
+ * A grid column defaults to `auto`, which resolves to the widest child's
+ * *min-content* — and grid items do not shrink below `min-width: auto`. So one
+ * item that refuses to narrow (a nowrap label, a <select> with long options, a
+ * <pre> of shell commands, a text input's intrinsic size) silently stretches
+ * every sibling past the container. Where the container scrolls, the overflow
+ * is clipped rather than visible, which is how it survived a page-level
+ * overflow check: `.chapters` measured 351px of content inside 309px and just
+ * hid the difference.
+ *
+ * minmax(0, 1fr) caps the column at the container and lets children shrink.
+ * Listed explicitly rather than applied globally so a future multi-column grid
+ * is not silently flattened.
+ */
+.field,
+.jobs,
+.job,
+.progress,
+.install-card,
+.setup .steps,
+.chapters,
+.review,
+.confirm,
+.check > span {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(120% 60% at 50% 0%, var(--bg-accent) 0%, transparent 60%),
+    var(--bg);
+  min-height: 100vh;
+  color: var(--text);
+  font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+  font-size: 15px;
+  line-height: 1.55;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Gutters come from padding, not from a 100vw calculation. 100vw counts the
+   scrollbar and ignores any padding on <body>, so a width derived from it can
+   exceed the space actually available — at which point the auto margins
+   collapse to zero and the whole page sits off-centre. Both cases are real
+   here: Android and desktop show classic scrollbars, and the safe-area insets
+   for an installed app put padding on <body>. width:100% is measured against
+   the true content box and cannot drift. */
+.page {
+  width: 100%;
+  max-width: 760px;   /* 720px of content plus the two 1.25rem gutters */
+  margin-inline: auto;
+  padding: 3rem 1.25rem 5rem;
+}
+
+/* ---- masthead ---- */
+
+.masthead {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  margin-bottom: 2rem;
+}
+
+.logo {
+  border-radius: 13px;
+  box-shadow: var(--shadow);
+  flex: none;
+}
+
+h1 {
+  margin: 0;
+  font-size: 2rem;
+  letter-spacing: -0.025em;
+}
+
+.tagline {
+  margin: 0.15rem 0 0;
+  color: var(--muted);
+}
+
+h2 {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  font-size: 1.05rem;
+  letter-spacing: -0.01em;
+  margin: 2.5rem 0 1rem;
+}
+
+.badge {
+  font-size: 0.72rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--brand);
+  background: var(--wait-bg);
+  padding: 0.2rem 0.55rem;
+  border-radius: 999px;
+}
+
+/* ---- card + form ---- */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  box-shadow: var(--shadow);
+  padding: 1.5rem;
+}
+
+form {
+  display: grid;
+  gap: 1.4rem;
+}
+
+.field {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.field-label {
+  font-weight: 600;
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+}
+
+.hint {
+  margin: 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.dropzone {
+  display: grid;
+  place-items: center;
+  gap: 0.2rem;
+  padding: 1.9rem 1rem;
+  text-align: center;
+  border: 1.5px dashed var(--border);
+  border-radius: 12px;
+  background: var(--surface-sunken);
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s, transform 0.15s;
+}
+
+.dropzone:hover,
+.dropzone.dragging {
+  border-color: var(--brand);
+  background: var(--wait-bg);
+}
+
+.dropzone.dragging {
+  transform: scale(1.01);
+}
+
+.dropzone.filled {
+  border-style: solid;
+  border-color: var(--brand);
+}
+
+.file-name {
+  word-break: break-all;
+}
+
+select,
+input[type="file"] {
+  width: 100%;
+  /* Narrator options carry a description, so on a narrow screen the closed
+     control will not fit its own text — elide rather than hard-cut. */
+  text-overflow: ellipsis;
+  padding: 0.6rem 0.75rem;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--surface-sunken);
+  color: inherit;
+  font: inherit;
+  font-size: 0.95rem;
+}
+
+select:focus-visible,
+input:focus-visible,
+.dropzone:focus-within {
+  outline: 2px solid var(--brand);
+  outline-offset: 1px;
+}
+
+.check {
+  display: flex;
+  gap: 0.6rem;
+  align-items: flex-start;
+  cursor: pointer;
+  min-width: 0;
+}
+
+.check input {
+  width: auto;
+  margin-top: 0.2rem;
+  flex: none;
+}
+
+.check > span {
+  display: grid;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
+.check .hint {
+  display: block;
+}
+
+/* Position in the finished book, in place of the include checkbox — these
+   chapters are already recorded, so the only choice left is the name. */
+.chapter-number {
+  flex: none;
+  width: 1.6rem;
+  text-align: right;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+  color: var(--muted);
+}
+
+/* ---- citation preview ---- */
+
+.citations {
+  margin-top: 0.6rem;
+  padding-left: 1.9rem; /* line up under the checkbox label */
+  min-width: 0;
+}
+
+.citation-viewer {
+  margin-top: 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-sunken);
+  padding: 0.8rem 0.9rem;
+}
+
+.citation-quote {
+  margin: 0 0 0.6rem;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  /* Reference strings have no spaces to break at ("1 Cor. 12:4–6" is short,
+     but URLs and long verse ranges are not). */
+  overflow-wrap: anywhere;
+}
+
+.citation-context {
+  color: var(--muted);
+}
+
+.citation-quote mark {
+  background: var(--err-bg);
+  color: var(--err);
+  border-radius: 4px;
+  padding: 0.05rem 0.25rem;
+  margin: 0 0.15rem;
+  font-weight: 600;
+}
+
+.citation-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6rem;
+}
+
+.citation-nav .btn {
+  font-size: 1.1rem;
+  line-height: 1;
+  padding: 0.25rem 0.7rem;
+}
+
+.citation-nav .hint {
+  text-align: center;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.narrator-row {
+  display: flex;
+  gap: 0.6rem;
+}
+
+.narrator-row select {
+  flex: 1;
+}
+
+/* ---- buttons ---- */
+
+.btn {
+  font: inherit;
+  font-weight: 600;
+  border-radius: 10px;
+  padding: 0.6rem 1.1rem;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s, opacity 0.15s;
+  text-decoration: none;
+  display: inline-block;
+}
+
+.btn:active {
+  transform: translateY(1px);
+}
+
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  justify-self: start;
+  background: linear-gradient(180deg, var(--brand-light), var(--brand));
+  color: #fff;
+  padding-inline: 1.4rem;
+}
+
+.btn-primary:not(:disabled):hover {
+  background: linear-gradient(180deg, var(--brand), var(--brand-dark));
+}
+
+.btn-ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--brand);
+  white-space: nowrap;
+}
+
+.btn-ghost:not(:disabled):hover {
+  border-color: var(--brand);
+  background: var(--wait-bg);
+}
+
+.btn-ghost.playing {
+  background: var(--wait-bg);
+  border-color: var(--brand);
+}
+
+.btn-download {
+  justify-self: start;
+  background: var(--wait-bg);
+  color: var(--brand);
+  font-size: 0.9rem;
+  padding: 0.45rem 0.9rem;
+}
+
+.btn-download:hover {
+  background: var(--brand);
+  color: #fff;
+}
+
+/* ---- jobs ---- */
+
+.jobs {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: grid;
+  gap: 0.85rem;
+}
+
+.job {
+  display: grid;
+  gap: 0.6rem;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  padding: 1.1rem 1.25rem;
+}
+
+.job-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.job-title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.job-meta {
+  margin: -0.35rem 0 0;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  flex: none;
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 0.25rem 0.65rem;
+  border-radius: 999px;
+  background: var(--wait-bg);
+  color: var(--brand);
+  white-space: nowrap;
+}
+
+.pill-done {
+  background: var(--ok-bg);
+  color: var(--ok);
+}
+
+.pill-failed {
+  background: var(--err-bg);
+  color: var(--err);
+}
+
+.pulse {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
+.progress {
+  display: grid;
+  gap: 0.4rem;
+}
+
+.bar {
+  height: 7px;
+  border-radius: 4px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  overflow: hidden;
+}
+
+.bar-fill {
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, var(--brand-light), var(--brand));
+  transition: width 0.6s ease;
+}
+
+.progress-meta {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.82rem;
+  color: var(--muted);
+}
+
+.error {
+  color: var(--err);
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.error-box {
+  margin: 0;
+  padding: 0.7rem 0.85rem;
+  border-radius: 10px;
+  background: var(--err-bg);
+  color: var(--err);
+  font-size: 0.78rem;
+  white-space: pre-wrap;
+  overflow-x: auto;
+}
+
+.empty {
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px dashed var(--border);
+  border-radius: 14px;
+  padding: 2rem 1rem;
+  text-align: center;
+  margin: 0;
+}
+
+/* ---- install ---- */
+
+.install-btn {
+  align-self: center;
+}
+
+.install-card {
+  display: grid;
+  gap: 0.9rem;
+  justify-items: start;
+  padding: 1.1rem 1.25rem;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: var(--surface-sunken);
+}
+
+.install-card p {
+  margin: 0.3rem 0 0;
+}
+
+/* ---- installed-app window ----
+   In standalone mode there is no browser chrome, so the page itself has to
+   keep clear of the notch, the status bar and the home indicator. */
+
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+
+/* ---- review step ---- */
+
+.review-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 1rem;
+}
+
+.review-head > div {
+  flex: 1;
+  min-width: 0;
+}
+
+.cover {
+  width: 74px;
+  height: auto;
+  border-radius: 6px;
+  box-shadow: var(--shadow);
+  flex: none;
+}
+
+.book-title {
+  margin: 0;
+  display: block;
+  font-size: 1.15rem;
+  letter-spacing: -0.015em;
+}
+
+.notice {
+  background: var(--wait-bg);
+  border: 1px solid color-mix(in srgb, var(--brand) 30%, transparent);
+  border-radius: 12px;
+  padding: 0.8rem 1rem;
+  font-size: 0.9rem;
+}
+
+.notice.warn {
+  background: var(--err-bg);
+  border-color: color-mix(in srgb, var(--err) 35%, transparent);
+  color: var(--err);
+  margin-bottom: 1.5rem;
+}
+
+/* ---- tabs ---- */
+
+.tabs {
+  margin-left: auto;
+  display: flex;
+  gap: 0.35rem;
+}
+
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  font: inherit;
+  font-weight: 600;
+  font-size: 0.9rem;
+  color: var(--muted);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 0.4rem 0.8rem;
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--text);
+}
+
+.tab.active {
+  color: var(--brand);
+  background: var(--surface);
+  border-color: var(--border);
+  box-shadow: var(--shadow);
+}
+
+.tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+}
+
+.tab-dot.on {
+  background: var(--ok);
+}
+
+.tab-dot.off {
+  background: var(--muted);
+  opacity: 0.5;
+}
+
+/* ---- setup page ---- */
+
+.setup .steps {
+  margin: 1.5rem 0 0;
+  padding-left: 1.3rem;
+  display: grid;
+  gap: 1.5rem;
+}
+
+.setup .steps li {
+  padding-left: 0.3rem;
+}
+
+.setup .steps p {
+  margin: 0.3rem 0 0.6rem;
+}
+
+.setup .btn-primary {
+  margin-top: 0.5rem;
+}
+
+.cmd {
+  margin: 0.5rem 0;
+  padding: 0.8rem 1rem;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.82rem;
+  line-height: 1.7;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.worker-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.7rem;
+  margin-top: 1.3rem;
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  font-size: 0.9rem;
+  border: 1px solid var(--border);
+  background: var(--surface-sunken);
+}
+
+.worker-status.online {
+  background: var(--ok-bg);
+  border-color: color-mix(in srgb, var(--ok) 30%, transparent);
+}
+
+.worker-status.online.warn {
+  background: var(--err-bg);
+  border-color: color-mix(in srgb, var(--err) 30%, transparent);
+}
+
+.worker-status.offline {
+  background: var(--wait-bg);
+}
+
+.worker-status .dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  margin-top: 0.35rem;
+  border-radius: 50%;
+  background: var(--ok);
+}
+
+.setup .notes {
+  margin-top: 1.8rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+}
+
+.setup .notes summary {
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 0.9rem;
+}
+
+.setup .notes p {
+  margin: 0.7rem 0 0;
+}
+
+code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 0.85em;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 0.05rem 0.35rem;
+}
+
+.chapters {
+  list-style: none;
+  margin: 0;
+  padding: 0.35rem;
+  display: grid;
+  gap: 0.15rem;
+  max-height: 340px;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface-sunken);
+}
+
+/* The row is now a block so an expanded excerpt can sit beneath it; the
+   controls themselves moved into .chapter-row. */
+.chapter {
+  padding: 0.25rem 0.4rem;
+  border-radius: 8px;
+}
+
+.chapter-row {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  min-width: 0;
+}
+
+.chapter-peek {
+  flex: none;
+  font: inherit;
+  font-size: 0.75rem;
+  line-height: 1;
+  color: var(--muted);
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  padding: 0.3rem 0.4rem;
+  cursor: pointer;
+}
+
+.chapter-peek:hover {
+  color: var(--brand);
+  border-color: var(--border);
+}
+
+.chapter.open {
+  background: var(--surface);
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
+.chapter-excerpt {
+  margin: 0.35rem 0 0.5rem;
+  padding: 0.7rem 0.85rem;
+  border-radius: 8px;
+  background: var(--surface-sunken);
+  border: 1px solid var(--border);
+}
+
+.chapter-excerpt p {
+  margin: 0;
+  font-size: 0.85rem;
+  line-height: 1.6;
+  /* Verbatim book text: preserve its paragraph breaks rather than running it
+     all together, but keep long words from forcing the row wide. */
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.chapter-excerpt .hint {
+  margin-top: 0.5rem;
+  font-size: 0.78rem;
+}
+
+.chapter-more {
+  color: var(--muted);
+}
+
+.chapter:hover {
+  background: var(--surface);
+}
+
+.chapter.excluded .chapter-title {
+  opacity: 0.45;
+  text-decoration: line-through;
+}
+
+.chapter-main {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-width: 0;
+}
+
+.chapter-title {
+  flex: 1;
+  min-width: 0;
+  font: inherit;
+  font-size: 0.9rem;
+  color: inherit;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  padding: 0.3rem 0.45rem;
+}
+
+.chapter-title:hover {
+  border-color: var(--border);
+}
+
+.chapter-title:focus {
+  background: var(--surface);
+  border-color: var(--brand);
+  outline: none;
+}
+
+.chapter-title.flagged {
+  border-color: color-mix(in srgb, #f59e0b 55%, transparent);
+}
+
+.tag {
+  flex: none;
+  font-size: 0.68rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 0.15rem 0.45rem;
+  border-radius: 999px;
+  background: #fef3c7;
+  color: #92400e;
+  cursor: help;
+}
+
+.tag-generic {
+  background: var(--err-bg);
+  color: var(--err);
+}
+
+@media (prefers-color-scheme: dark) {
+  .tag { background: #3a2e12; color: #fbbf24; }
+}
+
+.chapter-size {
+  flex: none;
+  font-size: 0.75rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+}
+
+.job-actions {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
+}
+
+.btn-small {
+  font-size: 0.85rem;
+  padding: 0.4rem 0.8rem;
+}
+
+.linklike {
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  color: var(--brand);
+  text-decoration: underline;
+  cursor: pointer;
+}
+
+.dropzone.busy {
+  border-color: var(--brand);
+  background: var(--wait-bg);
+}
+
+.review {
+  display: grid;
+  gap: 1.3rem;
+}
+
+/* ---- delete ---- */
+
+.btn-danger {
+  background: var(--err);
+  color: #fff;
+  border-color: transparent;
+}
+
+.btn-danger:hover {
+  filter: brightness(0.92);
+}
+
+.btn-quiet {
+  color: var(--muted);
+  margin-left: auto;
+}
+
+.btn-quiet:hover {
+  color: var(--err);
+  border-color: var(--err);
+  background: var(--err-bg);
+}
+
+.confirm {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.85rem 1rem;
+  border-radius: 12px;
+  background: var(--err-bg);
+  font-size: 0.9rem;
+}
+
+.job-actions {
+  flex-wrap: wrap;
+}
+
+/* ---- concurrency picker ---- */
+
+.speed-row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.speed {
+  flex: 1;
+  display: grid;
+  gap: 0.1rem;
+  padding: 0.55rem 0.4rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface-sunken);
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  text-align: center;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.speed span {
+  font-size: 0.72rem;
+  color: var(--muted);
+}
+
+.speed:hover {
+  border-color: var(--brand);
+}
+
+.speed.chosen {
+  border-color: var(--brand);
+  background: var(--wait-bg);
+}
+
+.speed.chosen strong,
+.speed.chosen span {
+  color: var(--brand);
+}
+
+.pill-cancelled {
+  background: var(--wait-bg);
+  color: var(--muted);
+}
+
+
+/* =====================================================================
+   Responsive and installed-app overrides.
+
+   Deliberately last in the file. They share specificity with the base
+   rules they adjust, so source order decides the winner — sitting
+   mid-file, `.review-head > div { flex-basis: 100% }` was silently
+   losing to the `flex: 1` declared eighty lines later, and the mobile
+   header never stacked.
+   ===================================================================== */
+@media (display-mode: standalone), (display-mode: window-controls-overlay) {
+  body {
+    padding: env(safe-area-inset-top) env(safe-area-inset-right)
+             env(safe-area-inset-bottom) env(safe-area-inset-left);
+  }
+  .page {
+    padding-top: 1.5rem;
+  }
+  /* Overscroll rubber-banding reads as a broken window rather than a page. */
+  html, body {
+    overscroll-behavior-y: none;
+  }
+}
+
+/* ---- small screens ---- */
+
+@media (max-width: 620px) {
+  .page {
+    /* Tighter gutters reclaim ~12px of card width on a narrow screen, where it
+       is worth more than the whitespace. */
+    padding: 1.75rem 0.85rem 3.5rem;
+  }
+
+  h1 { font-size: 1.6rem; }
+  h2 { margin: 2rem 0 0.85rem; }
+
+  .masthead {
+    gap: 0.8rem;
+    flex-wrap: wrap;
+  }
+  .logo { width: 42px; height: 42px; }
+  .tagline { font-size: 0.88rem; }
+
+  /* The tabs drop to their own full-width row rather than crushing the title. */
+  .tabs {
+    order: 3;
+    width: 100%;
+    margin-left: 0;
+  }
+  .tab { flex: 1; justify-content: center; }
+
+  .card { padding: 1.1rem; border-radius: 14px; }
+  .job { padding: 0.95rem 1rem; }
+
+  .narrator-row { flex-direction: column; }
+
+  /* Stack the cover above the details instead of squeezing both. */
+  /* Cover and title share the first row so the title has room to read; the
+     60% basis is what pushes Cancel out of that row, where it lands beneath
+     and right-aligned rather than squeezing the title to one word per line. */
+  .review-head { flex-wrap: wrap; gap: 0.8rem; }
+  .review-head > div { flex: 1 1 60%; order: 1; }
+  .review-head > .btn { order: 2; margin-left: auto; }
+  .cover { width: 58px; }
+  .book-title { font-size: 0.98rem; }
+
+  .chapters { max-height: 50vh; }
+
+  /* Buttons wrap and get a comfortable thumb target (44px is Apple's floor). */
+  .actions, .job-actions { flex-wrap: wrap; }
+  .actions .btn { flex: 1 1 auto; text-align: center; }
+  .btn, .tab { min-height: 44px; }
+  .btn-small { min-height: 38px; }
+
+  .speed-row { flex-wrap: wrap; }
+  .speed { flex: 1 1 30%; min-height: 44px; }
+
+  /* Bigger hit area for the include/exclude ticks and the preview toggle. */
+  .chapter { padding: 0.4rem; }
+  .chapter-row { gap: 0.55rem; }
+  .chapter-row > input[type="checkbox"] { width: 20px; height: 20px; }
+  .chapter-peek { padding: 0.5rem 0.45rem; }
+  /* The size badge is the least useful thing here once space is tight. */
+  .chapter-size { display: none; }
+
+  /* The indent that lines the count up under the checkbox costs more than it
+     is worth once the screen is this narrow. */
+  .citations { padding-left: 0; }
+  /* The chapter name is the first thing to sacrifice — the counter is not. */
+  .citation-nav .hint { font-size: 0.78rem; }
+
+  .cmd { font-size: 0.76rem; }
+}
+
+@media (max-width: 380px) {
+  .job-actions .btn-small { flex: 1 1 100%; }
+}
