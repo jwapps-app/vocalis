@@ -87,6 +87,10 @@ WORKER_DB_HOSTPORT = os.environ.get("WORKER_DB_HOSTPORT", "127.0.0.1:5445")
 # above the worker's poll interval so a busy narrator is never called dead.
 WORKER_STALE_SECONDS = 30
 
+# The port the web UI is published on, so the bundle can tell the worker where
+# to fetch books from. Matches WEB_PORT in the compose file.
+WEB_PORT = os.environ.get("WEB_PORT", "8091")
+
 
 # ---------------------------------------------------------------- narrators
 
@@ -103,6 +107,25 @@ def get_narrators():
         }
         for n in list_narrators()
     ]
+
+
+@app.get("/api/narrators/{narrator_id}/clip")
+def narrator_clip(narrator_id: str):
+    """The reference recording a narrator is cloned from.
+
+    Served rather than shared: the worker used to read this straight off a
+    mounted copy of the data directory, which is what forced every split
+    installation to set up a network share.
+    """
+    preset = resolve(narrator_id)
+    if preset is None:
+        raise HTTPException(404, "unknown narrator")
+    if not preset["ref"]:
+        raise HTTPException(404, "this narrator has no reference clip")
+    path = DATA_DIR / preset["ref"]
+    if not path.is_file():
+        raise HTTPException(404, "reference clip missing from the data dir")
+    return FileResponse(path, media_type="audio/wav")
 
 
 @app.get("/api/narrators/{narrator_id}/preview")
@@ -333,18 +356,85 @@ def job_recorded(job_id: uuid.UUID):
     dropping one is a repackage, but re-adding a section that was skipped the
     first time means recording it. The review screen uses this to say which is
     which instead of letting a tick-box quietly start hours of work.
+
+    Derived from the job's own plan rather than from files, because the audio
+    now lives on the worker's local disk and this server never sees it. For a
+    finished book the two agree exactly: every included chapter was narrated,
+    and every excluded one was not.
     """
-    work_dir = DATA_DIR / "work" / str(job_id)
-    if not work_dir.is_dir():
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT status, chapters FROM jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "job not found")
+    if row["status"] != "done" or not row["chapters"]:
         return {"indexes": []}
-    found = set()
-    for path in work_dir.glob("chapter_*.wav"):
-        # chapter_0004.wav (whole) and chapter_0004_002.wav (segment) both carry
-        # the original chapter index in the first field.
-        digits = path.stem.split("_")[1] if "_" in path.stem else ""
-        if digits.isdigit():
-            found.add(int(digits))
-    return {"indexes": sorted(found)}
+    return {
+        "indexes": sorted(
+            c["index"] for c in row["chapters"] if c.get("include")
+        )
+    }
+
+
+# ------------------------------------------------- files the worker exchanges
+#
+# The worker runs on whichever machine has the GPU, which is routinely not this
+# one. It fetches what it needs and posts back what it produced, so the two
+# halves share a database and nothing else — no mounted volume, no matching
+# paths, no credentials for a file share.
+
+
+@app.get("/api/jobs/{job_id}/epub")
+def job_epub(job_id: uuid.UUID):
+    """The uploaded book, for the worker to parse."""
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT epub_path FROM jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "job not found")
+    path = DATA_DIR / row["epub_path"]
+    if not path.is_file():
+        raise HTTPException(404, "the uploaded EPUB is missing")
+    return FileResponse(path, media_type="application/epub+zip")
+
+
+@app.get("/api/jobs/{job_id}/voice")
+def job_voice(job_id: uuid.UUID):
+    """A custom reference clip uploaded for this job, if there is one."""
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT voice_ref_path FROM jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "job not found")
+    if not row["voice_ref_path"]:
+        raise HTTPException(404, "this job uses a preset narrator")
+    path = DATA_DIR / row["voice_ref_path"]
+    if not path.is_file():
+        raise HTTPException(404, "reference clip missing")
+    return FileResponse(path, media_type="audio/wav")
+
+
+@app.post("/api/jobs/{job_id}/output", status_code=201)
+def upload_output(job_id: uuid.UUID, file: UploadFile = File(...)):
+    """Receive a finished audiobook (or audition) from the worker.
+
+    The worker sets the job's own status; this only stores the file and records
+    where it landed, so a failed upload cannot leave a job marked done with
+    nothing to download.
+    """
+    with pool.connection() as conn:
+        row = conn.execute("SELECT mode FROM jobs WHERE id = %s", (job_id,)).fetchone()
+        if row is None:
+            raise HTTPException(404, "job not found")
+
+        name = "sample.wav" if row["mode"] == "sample" else "book.m4b"
+        rel = f"output/{job_id}/{name}"
+        _save_upload(file, DATA_DIR / rel)
+        conn.execute("UPDATE jobs SET output_path = %s WHERE id = %s", (rel, job_id))
+    return {"output_path": rel}
 
 
 @app.get("/api/jobs/{job_id}/cover")
@@ -490,11 +580,13 @@ def reassemble(job_id: uuid.UUID, chapters: list[dict] | None = Body(None)):
     """Rebuild the M4B from cached chapter audio — no re-synthesis.
 
     Use after editing chapter titles or when assembly itself failed.
-    """
-    work_dir = DATA_DIR / "work" / str(job_id)
-    if not any(work_dir.glob("chapter_*.wav")):
-        raise HTTPException(409, "no cached chapter audio for this job")
 
+    Whether the audio is still cached is the worker's business now: it holds
+    the recordings on its own disk, reuses what is there and re-narrates
+    anything missing. This endpoint therefore queues the job rather than
+    refusing it — a check here could only guess, and guessing wrong would
+    either block a rebuild that would have worked or promise one that cannot.
+    """
     with pool.connection() as conn:
         row = conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()
         if row is None:
@@ -519,18 +611,19 @@ def _dir_bytes(directory: Path) -> int:
 
 
 def _disk_breakdown(job_id) -> dict[str, int]:
-    """Split a job's footprint into the audiobook you keep and the cache you
-    can reclaim. Shown separately because they mean different things: the M4B
-    in `output/` is the deliverable, the chapter WAVs in `work/` are scratch
-    that 'Free space' removes.
+    """What this server stores for a job: the audiobook and the source EPUB.
+
+    The scratch recordings are no longer counted because they are no longer
+    here — the worker keeps them on its own disk. Reporting a cache size of
+    zero would be a lie of a different kind, so the field is simply gone, and
+    with it the "Free space" button that used to delete files this server can
+    no longer reach.
     """
     output = _dir_bytes(DATA_DIR / "output" / str(job_id))
-    cache = _dir_bytes(DATA_DIR / "work" / str(job_id))
     upload = _dir_bytes(DATA_DIR / "uploads" / str(job_id))
     return {
         "output_bytes": output,
-        "cache_bytes": cache,
-        "disk_bytes": output + cache + upload,
+        "disk_bytes": output + upload,
     }
 
 
@@ -570,24 +663,6 @@ def delete_job(job_id: uuid.UUID):
     return Response(status_code=204)
 
 
-@app.delete("/api/jobs/{job_id}/cache", status_code=200)
-def clear_cache(job_id: uuid.UUID):
-    """Drop cached chapter audio but keep the finished M4B and the library entry.
-
-    Reclaims most of the disk; the trade-off is that "Rebuild file" will no
-    longer work for this book without a full re-narration.
-    """
-    with pool.connection() as conn:
-        row = conn.execute("SELECT status FROM jobs WHERE id = %s", (job_id,)).fetchone()
-        if row is None:
-            raise HTTPException(404, "job not found")
-        if row["status"] in RUNNING:
-            raise HTTPException(409, "this book is still being narrated")
-
-    shutil.rmtree(DATA_DIR / "work" / str(job_id), ignore_errors=True)
-    return {"disk_bytes": _disk_bytes(job_id)}
-
-
 @app.get("/api/jobs/{job_id}")
 def get_job(job_id: uuid.UUID):
     with pool.connection() as conn:
@@ -616,6 +691,18 @@ def _worker_db_url() -> str:
     user = userinfo.partition(":")[0]
     _, _, dbname = tail.partition("/")
     return f"{scheme}://{user}@{WORKER_DB_HOSTPORT}/{dbname}"
+
+
+def _public_api_url() -> str:
+    """The address the worker machine should call this API on.
+
+    Derived from the database host the worker is already being told to use,
+    because that is by definition an address that machine can reach — unlike
+    anything this container can see about itself, which is a private Compose
+    network address.
+    """
+    host = WORKER_DB_HOSTPORT.split(":")[0]
+    return os.environ.get("PUBLIC_API_URL", f"http://{host}:{WEB_PORT}")
 
 
 @app.get("/api/worker")
@@ -650,14 +737,9 @@ def worker_bundle(request: Request):
         "# network, so install.sh asks for it on the machine that needs it.\n"
         f"DATABASE_URL={_worker_db_url()}\n"
         "\n"
-        "# Where this server keeps its data directory. The worker has to read and\n"
-        "# write the same folder, so install.sh uses this to locate it — the same\n"
-        "# path when the worker runs on this machine, otherwise the tail of\n"
-        "# whatever mount point the share appears at.\n"
-        f"VOCALIS_SERVER_DATA_DIR={os.environ.get('HOST_DATA_DIR', '')}\n"
-        "\n"
-        "# Set this only to override what install.sh works out for itself.\n"
-        "#VOCALIS_DATA_DIR=\n"
+        "# Books come down from here and finished audio goes back the same way,\n"
+        "# so there is no shared folder to mount or keep in step.\n"
+        f"VOCALIS_API_URL={_public_api_url()}\n"
     )
 
     buf = io.BytesIO()

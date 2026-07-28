@@ -8,8 +8,17 @@ DATABASE_URL = os.environ.get(
     "DATABASE_URL", "postgresql://vocalis@127.0.0.1:5445/vocalis"
 )
 
-# Must point at the same directory Compose bind-mounts into the API at /data.
-DATA_DIR = Path(os.environ.get("VOCALIS_DATA_DIR", "./data")).resolve()
+# Where the API lives. Books and finished audio move over HTTP, so this is the
+# only thing besides the database the worker needs to know about the server —
+# and in particular there is no shared directory to mount or keep in step.
+API_URL = os.environ.get("VOCALIS_API_URL", "http://127.0.0.1:8091")
+
+# Purely local scratch: downloaded books, chapter audio, the assembled file
+# before it is uploaded. Nothing here is shared with the API, so it belongs on
+# fast local disk rather than on a share.
+WORK_DIR = Path(
+    os.environ.get("VOCALIS_WORK_DIR", "~/Library/Application Support/Vocalis")
+).expanduser().resolve()
 
 POLL_INTERVAL_SECONDS = float(os.environ.get("VOCALIS_POLL_INTERVAL", "5"))
 

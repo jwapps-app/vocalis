@@ -2,9 +2,11 @@
 
 Runs on the host directly (never in Docker — MPS does not pass through).
 
-Chapter audio is cached under <DATA_DIR>/work/<job-id>/ and reused whenever a
-job runs again, so a failed, cancelled, or re-assembled job never re-narrates
-audio it already has.
+Books arrive over HTTP and finished audio is posted back, so this machine
+shares no filesystem with the server — only the job queue in Postgres. Chapter
+audio is cached under the local scratch directory and reused whenever a job
+runs again, so a failed, cancelled, or re-assembled job never re-narrates audio
+it already has.
 """
 
 import hashlib
@@ -12,6 +14,7 @@ import logging
 import signal
 import time
 import traceback
+from pathlib import Path
 
 import psycopg
 from psycopg.rows import dict_row
@@ -23,6 +26,7 @@ from . import config
 from .assemble import assemble_m4b
 from .identity import describe, refresh
 from .pool import Cancelled, ChapterPool, cached_seconds
+from . import transport
 
 log = logging.getLogger("vocalis.worker")
 
@@ -191,15 +195,47 @@ def _drop_restaled_audio(work_dir, prefix: str, original: int,
     sig_path.write_text(signature)
 
 
+def fetch_voice(job, work_dir: Path) -> Path | None:
+    """Download the reference clip this job narrates with, if it has one.
+
+    Two sources, and the job says which: a clip uploaded for this book alone,
+    or one of the presets. Cached per job because the same clip is used for
+    every chapter and a resumed job should not re-fetch it.
+    """
+    ref = job.get("voice_ref_path")
+    if not ref:
+        return None
+    dest = work_dir / "voice.wav"
+    if dest.is_file():
+        return dest
+    # Custom clips live under the job; presets are named in the manifest.
+    if ref.startswith("uploads/"):
+        found = transport.download(f"/api/jobs/{job['id']}/voice", dest)
+    else:
+        narrator = Path(ref).stem
+        found = transport.download(f"/api/narrators/{narrator}/clip", dest)
+    if not found:
+        raise RuntimeError(f"the server has no reference clip for {ref!r}")
+    return dest
+
+
 def process_job(conn: psycopg.Connection, job) -> None:
     job_id = job["id"]
     is_sample = job["mode"] == "sample"
     log.info("Processing %s job %s", job["mode"], job_id)
 
-    epub_path = config.DATA_DIR / job["epub_path"]
-    voice_ref = config.DATA_DIR / job["voice_ref_path"] if job["voice_ref_path"] else None
-    work_dir = config.DATA_DIR / f"work/{job_id}"
+    # Everything below lives on this machine's own disk. The book comes down
+    # over HTTP and the finished file goes back the same way, so no directory
+    # is shared with the server.
+    work_dir = config.WORK_DIR / "work" / str(job_id)
     work_dir.mkdir(parents=True, exist_ok=True)
+
+    epub_path = work_dir / "book.epub"
+    if not epub_path.is_file():
+        if not transport.download(f"/api/jobs/{job_id}/epub", epub_path):
+            raise RuntimeError("the server has no EPUB for this job")
+
+    voice_ref = fetch_voice(job, work_dir)
 
     book = parse_epub(epub_path)
     if not book.chapters:
@@ -356,18 +392,26 @@ def process_job(conn: psycopg.Connection, job) -> None:
     ]
 
     if is_sample:
-        out_path = config.DATA_DIR / "output" / str(job_id) / "sample.wav"
-        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path = work_dir / "sample.wav"
         out_path.write_bytes(paths[0].read_bytes())
     else:
-        out_path = config.DATA_DIR / "output" / str(job_id) / "book.m4b"
+        out_path = work_dir / "book.m4b"
         assemble_m4b(paths, chapter_meta, book.title, book.author, cover_path,
                      work_dir, out_path)
+
+    # Hand the finished file to the server, which records where it stored it.
+    # Uploading before the job is marked done means a failed transfer surfaces
+    # as a failed job rather than one that claims to have an audiobook nobody
+    # can download.
+    log.info("Uploading %s (%.0f MB)", out_path.name, out_path.stat().st_size / 1e6)
+    transport.upload(f"/api/jobs/{job_id}/output", out_path)
 
     update(
         conn, job_id,
         status="done", progress=100.0,
-        output_path=str(out_path.relative_to(config.DATA_DIR)),
+        # output_path is set by the upload endpoint — the server decides where
+        # it keeps the file, and only it knows the path was really written.
+        #
         # The M4B is a straight concatenation, so the chapter durations sum to
         # its playing time exactly.
         audio_seconds=sum(seg_seconds.values()),
@@ -394,49 +438,16 @@ def _exit_on_sigterm(signum, frame):
     raise SystemExit(0)
 
 
-def data_dir_ready() -> bool:
-    """Whether the shared data directory is really there.
-
-    Tests for a file the server seeds rather than for the directory itself,
-    because the common failure is an unmounted network share: the mount point
-    still exists as an empty folder, and every mkdir(parents=True) below would
-    cheerfully write a whole book's audio onto the local disk underneath it —
-    invisible until someone wonders why the share is empty and the startup disk
-    is full.
-    """
-    return (config.DATA_DIR / "narrators" / "manifest.json").is_file()
-
-
-def await_data_dir() -> None:
-    """Wait for the share to appear instead of failing at boot.
-
-    A worker set to start at login usually beats the network share it depends
-    on, and on macOS an SMB mount does not come back on its own after a
-    restart. Waiting turns 'permanently broken until someone notices' into
-    'starts working the moment the share is mounted'.
-    """
-    if data_dir_ready():
-        return
-    log.warning("Waiting for the data folder at %s — mount the share and this "
-                "will continue on its own", config.DATA_DIR)
-    while not data_dir_ready():
-        time.sleep(10)
-    log.info("Data folder available")
-
-
 def run() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
-    log.info("Worker ready (data=%s)", config.DATA_DIR)
-    await_data_dir()
+    log.info("Worker ready (api=%s, scratch=%s)", config.API_URL, config.WORK_DIR)
+    config.WORK_DIR.mkdir(parents=True, exist_ok=True)
 
     startup = True
     while True:
         try:
-            # Re-checked every pass: a share can disappear mid-run when the
-            # server reboots or the network drops.
-            await_data_dir()
             with connect() as conn:
                 if startup:
                     requeue_orphans(conn)

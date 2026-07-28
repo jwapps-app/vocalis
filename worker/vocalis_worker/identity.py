@@ -76,7 +76,7 @@ _cached: dict | None = None
 
 def worker_id() -> str:
     """Stable per-installation token, so restarts reuse one `workers` row."""
-    path = config.DATA_DIR / ".worker-id"
+    path = config.WORK_DIR / ".worker-id"
     try:
         return path.read_text().strip()
     except OSError:

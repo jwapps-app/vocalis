@@ -39,14 +39,13 @@ services:
       # the Setup page hands out, so it must be an address that machine can
       # resolve — this host's LAN address when the worker is not on this box.
       WORKER_DB_HOSTPORT: ${WORKER_DB_HOSTPORT:-127.0.0.1:5445}
-      # The data directory's path *on this host*, which the container itself
-      # cannot see — it only knows /data. The worker installer uses it to find
-      # the shared folder without asking: identical when the worker runs on
-      # this machine, and the tail of the mount point when it does not.
-      HOST_DATA_DIR: ${VOCALIS_DATA_DIR:-./data}
+      # Lets the worker bundle name the address the narrator should fetch
+      # books from — the container cannot see how it is published.
+      WEB_PORT: ${WEB_PORT:-8091}
     volumes:
-      # The narrator also needs this directory. On one machine that is a plain
-      # path; split across two, share it and mount it on the worker as well.
+      # Uploaded books, narrator voices and finished audiobooks. The narrator
+      # no longer needs this — it fetches and posts over HTTP — so nothing has
+      # to mount it a second time.
       - ${VOCALIS_DATA_DIR:-./data}:/data
     depends_on:
       db:

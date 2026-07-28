@@ -2,7 +2,6 @@ import { DragEvent, useEffect, useRef, useState } from "react";
 import {
   analyzeEpub,
   cancelJob,
-  clearCache,
   deleteJob,
   resumeJob,
   downloadUrl,
@@ -82,7 +81,6 @@ function JobCard({
   onEditChapters: (job: Job) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
-  const [confirmingFree, setConfirmingFree] = useState(false);
   const active = ACTIVE.has(job.status);
   const done = job.status === "done";
   const isDraft = job.status === "draft";
@@ -134,15 +132,6 @@ function JobCard({
     }
   }
 
-  async function freeSpace() {
-    try {
-      await clearCache(job.id);
-      onRebuilt();
-    } catch (err) {
-      alert(`Could not clear cache: ${err instanceof Error ? err.message : err}`);
-    }
-  }
-
   return (
     <li className={`job job-${job.status}`}>
       <div className="job-head">
@@ -171,35 +160,7 @@ function JobCard({
         </div>
       )}
 
-      {confirmingFree ? (
-        <div className="confirm">
-          <span>
-            Delete {humanSize(job.cache_bytes ?? 0)} of recorded audio? The
-            audiobook itself stays, but <strong>chapters can no longer be
-            renamed</strong> afterwards — that rebuilds the file from this
-            recording, and re-doing it would mean narrating the book again.
-          </span>
-          <div className="job-actions">
-            <button
-              type="button"
-              className="btn btn-danger btn-small"
-              onClick={() => {
-                setConfirmingFree(false);
-                freeSpace();
-              }}
-            >
-              Free {humanSize(job.cache_bytes ?? 0)}
-            </button>
-            <button
-              type="button"
-              className="btn btn-ghost btn-small"
-              onClick={() => setConfirmingFree(false)}
-            >
-              Keep it
-            </button>
-          </div>
-        </div>
-      ) : confirming ? (
+      {confirming ? (
         <div className="confirm">
           <span>
             Delete this book from Vocalis?{" "}
@@ -252,10 +213,7 @@ function JobCard({
               Resume
             </button>
           )}
-          {/* Editing needs the cached chapter audio to rebuild from, and
-              "Free space" deletes exactly that — so offer this only while it is
-              actually possible rather than letting the attempt fail with a 409. */}
-          {done && (job.cache_bytes ?? 0) > 0 && (
+          {done && (
             <button
               type="button"
               className="btn btn-ghost btn-small"
@@ -263,18 +221,6 @@ function JobCard({
               title="Rename chapters and rewrite the file from the recording — no re-narration"
             >
               Edit chapters
-            </button>
-          )}
-            {done && (job.cache_bytes ?? 0) > 100 * 1024 * 1024 && (
-            <button
-              type="button"
-              className="btn btn-ghost btn-small"
-              onClick={() => setConfirmingFree(true)}
-              title={`Delete ${humanSize(
-                job.cache_bytes ?? 0
-              )} of recorded audio, keep the M4B`}
-            >
-              Free {humanSize(job.cache_bytes ?? 0)}
             </button>
           )}
           <button

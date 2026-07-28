@@ -38,57 +38,19 @@ else
 fi
 [ -n "$DB_PASSWORD" ] || die "no password entered"
 
+# Books and finished audio move over HTTP, so this is the only other thing the
+# worker needs to know. The bundle names it; fall back to the database host,
+# which is the same machine in every layout this installs.
+if [ -z "${VOCALIS_API_URL:-}" ]; then
+  db_host=$(printf '%s' "$DATABASE_URL" | sed -e 's|.*@||' -e 's|/.*||' -e 's|:.*||')
+  VOCALIS_API_URL="http://$db_host:8091"
+fi
+
 case "$(uname -s)" in
   Darwin) OS=mac ;;
   Linux)  OS=linux ;;
   *) die "unsupported system $(uname -s). See the setup page for Windows." ;;
 esac
-
-# ---------------------------------------------------------------- data folder
-#
-# The narrator reads the uploaded book and writes chapter audio back, so it
-# needs the *same* folder the server uses — not a folder of its own. Asking for
-# a path invites a plausible wrong answer that only surfaces later as a job
-# failing to find its book, so work it out instead and verify it.
-find_data_dir() {
-  # Told explicitly: trust it.
-  if [ -n "${VOCALIS_DATA_DIR:-}" ]; then
-    printf '%s' "$VOCALIS_DATA_DIR"; return
-  fi
-  server_dir=${VOCALIS_SERVER_DATA_DIR:-}
-  # Same machine as the server: the server's own path is already correct.
-  if [ -n "$server_dir" ] && [ -d "$server_dir/narrators" ]; then
-    printf '%s' "$server_dir"; return
-  fi
-  # A different machine: the share is mounted somewhere, with the tail of the
-  # server's path below it. Recognise it by the narrator voices the server
-  # seeded, which no other folder on the machine will have.
-  for base in /Volumes/* /mnt/* /media/*/*; do
-    [ -d "$base" ] || continue
-    if [ -n "$server_dir" ]; then
-      candidate="$base/${server_dir#/}"
-      [ -d "$candidate/narrators" ] && { printf '%s' "$candidate"; return; }
-    fi
-    for hit in $(find "$base" -maxdepth 4 -type d -name narrators 2>/dev/null); do
-      [ -f "$hit/manifest.json" ] && { printf '%s' "${hit%/narrators}"; return; }
-    done
-  done
-  printf ''
-}
-
-VOCALIS_DATA_DIR=$(find_data_dir)
-if [ -z "$VOCALIS_DATA_DIR" ]; then
-  printf '\n'
-  die "cannot find the Vocalis data folder.
-
-The narrator shares it with the server${VOCALIS_SERVER_DATA_DIR:+, which keeps it at
-  $VOCALIS_SERVER_DATA_DIR}.
-
-If the server is on another machine, mount its share first — on a Mac,
-Finder > Go > Connect to Server — then run this again. Nothing else needs
-setting up; it is found automatically once mounted."
-fi
-say "Sharing the server's data folder at $VOCALIS_DATA_DIR"
 
 # ------------------------------------------------------------------- python
 #
@@ -147,51 +109,6 @@ say "2/4  Installing the narrator (this downloads PyTorch — several minutes)"
 "$VENV/bin/pip" install --quiet -r "$HERE/worker/requirements.txt"
 "$VENV/bin/pip" install --quiet -e "$HERE/core"
 
-# Deliberately not `mkdir -p "$VOCALIS_DATA_DIR"`: if the share is a network
-# mount that is currently absent, creating it would make an empty local folder
-# that shadows the mount point, and the worker would fill the startup disk with
-# audio nobody can find. find_data_dir already proved the folder exists.
-
-# --------------------------------------------------- keep a share mounted
-#
-# macOS does not remount an SMB or NFS share after a restart, so a narrator set
-# to start at login would come back to an empty mount point. Register a login
-# agent that mounts it first, using the credentials already saved in the
-# keychain by the original Finder connection.
-mount_agent() {
-  [ "$OS" = mac ] || return 0
-  case "$VOCALIS_DATA_DIR" in /Volumes/*) ;; *) return 0 ;; esac
-  volume="/Volumes/$(printf '%s' "${VOCALIS_DATA_DIR#/Volumes/}" | cut -d/ -f1)"
-  # e.g. "//user@host/share on /Volumes/share (smbfs, ...)"
-  source=$(mount | awk -v v="$volume" '$3 == v { print $1; exit }')
-  case "$source" in //*) ;; *) return 0 ;; esac   # only handles SMB
-  url="smb:$(printf '%s' "$source" | sed 's/ /%20/g')"
-
-  MOUNT_LABEL="$LABEL.mount"
-  MOUNT_PLIST="$HOME/Library/LaunchAgents/$MOUNT_LABEL.plist"
-  cat > "$MOUNT_PLIST" <<MOUNT_END
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
-  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key><string>$MOUNT_LABEL</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/bin/sh</string>
-        <string>-c</string>
-        <string>[ -d "$VOCALIS_DATA_DIR/narrators" ] || /usr/bin/open "$url"</string>
-    </array>
-    <key>RunAtLoad</key><true/>
-</dict>
-</plist>
-MOUNT_END
-  launchctl bootout "gui/$(id -u)/$MOUNT_LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$MOUNT_PLIST" 2>/dev/null || true
-  say "Registered a login agent to remount $volume after a restart"
-}
-mount_agent
-
 say "3/4  Registering the background service"
 if [ "$OS" = mac ]; then
   PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
@@ -218,7 +135,7 @@ if [ "$OS" = mac ]; then
     <dict>
         <key>DATABASE_URL</key><string>$DATABASE_URL</string>
         <key>PGPASSWORD</key><string>$DB_PASSWORD</string>
-        <key>VOCALIS_DATA_DIR</key><string>$VOCALIS_DATA_DIR</string>
+        <key>VOCALIS_API_URL</key><string>$VOCALIS_API_URL</string>
         <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
     <key>RunAtLoad</key><true/>
@@ -228,8 +145,16 @@ if [ "$OS" = mac ]; then
 </dict>
 </plist>
 PLIST_END
+  # bootout returns before launchd has finished tearing the old service down,
+  # and bootstrapping into that window fails with "Input/output error" — which
+  # says nothing about the actual cause. Wait for it to go, then retry.
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
-  launchctl bootstrap "gui/$(id -u)" "$PLIST"
+  attempt=0
+  until launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null; do
+    attempt=$((attempt + 1))
+    [ "$attempt" -ge 10 ] && die "could not register the service. Try: launchctl bootstrap gui/$(id -u) $PLIST"
+    sleep 1
+  done
   LOG="$HOME/Library/Logs/vocalis-worker.log"
   STOP="launchctl bootout gui/\$(id -u)/$LABEL"
   RESTART="launchctl kickstart -k gui/\$(id -u)/$LABEL"
@@ -249,7 +174,7 @@ ExecStart=$VENV/bin/python -m vocalis_worker.main
 WorkingDirectory=$HERE/worker
 Environment=DATABASE_URL=$DATABASE_URL
 Environment=PGPASSWORD=$DB_PASSWORD
-Environment=VOCALIS_DATA_DIR=$VOCALIS_DATA_DIR
+Environment=VOCALIS_API_URL=$VOCALIS_API_URL
 Restart=always
 RestartSec=5
 

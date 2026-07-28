@@ -55,8 +55,6 @@ export interface Job {
   disk_bytes?: number;
   /** The finished M4B alone — the file you keep. List only. */
   output_bytes?: number;
-  /** Reclaimable chapter-audio scratch (the "Free space" target). List only. */
-  cache_bytes?: number;
 }
 
 export interface Worker {
@@ -175,10 +173,6 @@ export async function deleteJob(jobId: string): Promise<void> {
     }
     throw new Error(detail);
   }
-}
-
-export function clearCache(jobId: string): Promise<{ disk_bytes: number }> {
-  return req(`/api/jobs/${jobId}/cache`, { method: "DELETE" });
 }
 
 export const cancelJob = (id: string) =>
