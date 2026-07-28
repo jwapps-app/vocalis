@@ -1,0 +1,20 @@
+# Development override: build the images from this checkout instead of pulling
+# the published ones.
+#
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+#
+# The image names are inherited from docker-compose.yml, so a local build tags
+# itself the same way a pulled image is named and the two never diverge.
+
+services:
+  db:
+    build:
+      context: ./db
+
+  api:
+    build:
+      context: .
+      dockerfile: api/Dockerfile
+
+  web:
+    build: ./web

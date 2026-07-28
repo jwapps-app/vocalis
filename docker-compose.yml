@@ -1,50 +1,60 @@
+# Deployment compose: pulls prebuilt images, so this file plus .env is the
+# whole install. Nothing is built and no source tree is needed, which is what
+# lets it be pasted straight into Portainer's stack editor.
+#
+# To build from source instead — developing on this repo — add the override:
+#   docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+
 services:
   db:
-    image: postgres:16
+    # Postgres with the schema baked in — see db/Dockerfile. The schema arrives
+    # in the image rather than as a mounted init.sql so that no source tree has
+    # to sit beside this file.
+    image: ghcr.io/jwapps-app/vocalis-db:${VOCALIS_TAG:-latest}
     environment:
       POSTGRES_DB: vocalis
       POSTGRES_USER: vocalis
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — see .env.example}
     ports:
       # The native TTS worker connects here. Loopback by default so the
-      # database is not on the network at all; set DB_BIND=0.0.0.0 when the
-      # worker runs on a different machine from this stack — at which point the
+      # database is not on the network at all; set DB_BIND to this machine's
+      # LAN address when the worker runs elsewhere — at which point the
       # password is the only thing protecting it, so make it a real one.
       - "${DB_BIND:-127.0.0.1}:5445:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
-      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U vocalis -d vocalis"]
       interval: 5s
       timeout: 3s
       retries: 10
+    restart: unless-stopped
 
   api:
-    build:
-      context: .
-      dockerfile: api/Dockerfile
+    image: ghcr.io/jwapps-app/vocalis-api:${VOCALIS_TAG:-latest}
     environment:
       DATABASE_URL: postgresql://vocalis:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — see .env.example}@db:5432/vocalis
       DATA_DIR: /data
-      # Address the GPU machine uses to reach Postgres, baked into the worker
-      # bundle the setup page hands out. Default suits a worker on this same
-      # Mac; set to the server's LAN address for a worker on another machine.
+      # Where the GPU machine reaches Postgres. Baked into the worker bundle
+      # the Setup page hands out, so it must be an address that machine can
+      # resolve — this host's LAN address when the worker is not on this box.
       WORKER_DB_HOSTPORT: ${WORKER_DB_HOSTPORT:-127.0.0.1:5445}
     volumes:
-      # Same directory the native worker uses via VOCALIS_DATA_DIR.
+      # The narrator also needs this directory. On one machine that is a plain
+      # path; split across two, share it and mount it on the worker as well.
       - ${VOCALIS_DATA_DIR:-./data}:/data
     depends_on:
       db:
         condition: service_healthy
+    restart: unless-stopped
 
   web:
-    build: ./web
+    image: ghcr.io/jwapps-app/vocalis-web:${VOCALIS_TAG:-latest}
     ports:
-      # 8080/8083–8090 are taken by other fleet services.
-      - "8091:80"
+      - "${WEB_PORT:-8091}:80"
     depends_on:
       - api
+    restart: unless-stopped
 
 volumes:
   pgdata:
