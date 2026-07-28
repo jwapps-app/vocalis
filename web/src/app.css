@@ -1121,3 +1121,24 @@ code {
 @media (max-width: 380px) {
   .job-actions .btn-small { flex: 1 1 100%; }
 }
+
+.install-command {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+}
+
+.install-command .cmd {
+  flex: 1;
+  min-width: 0;
+  margin: 0.5rem 0;
+  /* The command is long and must stay copyable in one piece — wrap rather
+     than scroll, so nothing is hidden off the right edge on a phone. */
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.install-command .btn {
+  margin-top: 0.5rem;
+  flex: none;
+}

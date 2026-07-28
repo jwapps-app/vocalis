@@ -693,16 +693,27 @@ def _worker_db_url() -> str:
     return f"{scheme}://{user}@{WORKER_DB_HOSTPORT}/{dbname}"
 
 
-def _public_api_url() -> str:
+def _public_api_url(request: Request) -> str:
     """The address the worker machine should call this API on.
 
-    Derived from the database host the worker is already being told to use,
-    because that is by definition an address that machine can reach — unlike
-    anything this container can see about itself, which is a private Compose
-    network address.
+    Taken from the Host header of the request that asked, because that is the
+    address a browser on the network just used successfully — correct by
+    construction, including the port.
+
+    Guessing it from configuration was wrong in exactly the way that is hardest
+    to notice: a stack published on 8092 while the container still believed the
+    default 8091 handed out a bundle pointing at a port belonging to some other
+    service, and the worker installed cleanly and then could not fetch a book.
     """
-    host = WORKER_DB_HOSTPORT.split(":")[0]
-    return os.environ.get("PUBLIC_API_URL", f"http://{host}:{WEB_PORT}")
+    override = os.environ.get("PUBLIC_API_URL")
+    if override:
+        return override.rstrip("/")
+    host = request.headers.get("host")
+    if host:
+        return f"{request.url.scheme}://{host}"
+    # No Host header at all (a bare HTTP/1.0 client); fall back to the address
+    # the worker is already told to reach Postgres on.
+    return f"http://{WORKER_DB_HOSTPORT.split(':')[0]}:{WEB_PORT}"
 
 
 @app.get("/api/worker")
@@ -719,6 +730,49 @@ def worker_status():
             (WORKER_STALE_SECONDS,),
         ).fetchone()
     return {"worker": row}
+
+
+@app.get("/api/worker/install")
+def worker_install_script(request: Request):
+    """A shell script that downloads the bundle and installs it.
+
+    Exists because the download-and-double-click route cannot be made to work:
+    anything a browser saves is tagged com.apple.quarantine, and macOS refuses
+    to open an unsigned script from Finder with a dialog whose primary button
+    is "Move to Trash". Files fetched by curl carry no such tag.
+
+    It also removes two smaller traps — instructions that assume which
+    directory you are in, and browsers that silently unzip the download so the
+    unzip step fails on a file that is no longer there.
+
+    The server address is written in from the request that fetched this, so the
+    script cannot disagree with the page it was copied from.
+    """
+    api = _public_api_url(request)
+    script = f"""#!/bin/sh
+# Vocalis narrator installer. Fetches the worker bundle from {api} and runs it.
+set -eu
+
+API="{api}"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+printf '\\nDownloading the narrator from %s\\n' "$API"
+curl -fsSL "$API/api/worker/bundle" -o "$TMP/bundle.zip"
+
+# ditto over unzip: it is present on a stock macOS and preserves the
+# executable bit that the installer needs.
+if command -v ditto >/dev/null 2>&1; then
+  ditto -x -k "$TMP/bundle.zip" "$TMP/unpacked"
+else
+  mkdir -p "$TMP/unpacked" && unzip -q "$TMP/bundle.zip" -d "$TMP/unpacked"
+fi
+
+cd "$TMP/unpacked/vocalis-worker"
+chmod +x install.sh
+exec ./install.sh
+"""
+    return Response(script, media_type="text/x-shellscript")
 
 
 @app.get("/api/worker/bundle")
@@ -739,7 +793,7 @@ def worker_bundle(request: Request):
         "\n"
         "# Books come down from here and finished audio goes back the same way,\n"
         "# so there is no shared folder to mount or keep in step.\n"
-        f"VOCALIS_API_URL={_public_api_url()}\n"
+        f"VOCALIS_API_URL={_public_api_url(request)}\n"
     )
 
     buf = io.BytesIO()

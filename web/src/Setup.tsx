@@ -70,6 +70,37 @@ function StatusPanel({ worker }: { worker: Worker | null }) {
   );
 }
 
+/** The install command, with a one-tap copy — it is meant to be pasted on
+ *  another machine, where retyping an address is its own source of error.
+ *
+ *  Built from window.location so it names the address this page was actually
+ *  reached at. Anything derived from server configuration can disagree with
+ *  reality: a stack published on one port while the container believes another
+ *  hands out an installer pointing somewhere else entirely. */
+function InstallCommand() {
+  const [copied, setCopied] = useState(false);
+  const command = `curl -fsSL ${window.location.origin}/api/worker/install | sh`;
+
+  async function copy() {
+    try {
+      await navigator.clipboard.writeText(command);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      /* clipboard blocked (insecure origin) — the text is selectable anyway */
+    }
+  }
+
+  return (
+    <div className="install-command">
+      <pre className="cmd">{command}</pre>
+      <button type="button" className="btn btn-ghost btn-small" onClick={copy}>
+        {copied ? "Copied" : "Copy"}
+      </button>
+    </div>
+  );
+}
+
 export default function Setup() {
   const [worker, setWorker] = useState<Worker | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -99,40 +130,42 @@ export default function Setup() {
 
       <ol className="steps">
         <li>
-          <strong>Download the helper</strong>
+          <strong>Run this on the machine with the GPU</strong>
           <p className="hint">
-            A small bundle, already pointed at this server — no configuration to fill in.
+            Paste it into a terminal there. It asks for one thing — the database
+            password from this server's <code>.env</code> — and works out the rest.
           </p>
-          <a className="btn btn-primary" href={bundleUrl}>
-            Download narrator (.zip)
-          </a>
-        </li>
-        <li>
-          <strong>Unpack and install</strong>
+          <InstallCommand />
           <p className="hint">
-            You'll need <code>ffmpeg</code> first — on a Mac,{" "}
-            <code>brew install ffmpeg</code>; on Linux, <code>apt install ffmpeg</code>.
-            Then, in a terminal:
-          </p>
-          <pre className="cmd">
-            unzip vocalis-worker.zip{"\n"}
-            cd vocalis-worker{"\n"}
-            ./install.sh
-          </pre>
-          <p className="hint">
-            It sets up Python, downloads the voice model, and registers a background
-            service — <code>launchd</code> on a Mac, <code>systemd</code> on Linux — so it
-            runs from now on without a terminal open.
+            It finds a Python version the voice model supports, installs{" "}
+            <code>ffmpeg</code> if it's missing, downloads the model, and registers a
+            background service (<code>launchd</code> on a Mac, <code>systemd</code> on
+            Linux) so it keeps running without a terminal open.
           </p>
         </li>
         <li>
           <strong>Watch it connect</strong>
           <p className="hint">
-            The status above turns green within a few seconds of the install finishing.
+            The panel above turns green within a few seconds of the install finishing.
             The first book is slower while the voice model downloads.
           </p>
         </li>
       </ol>
+
+      <details className="notes">
+        <summary>Rather download it yourself?</summary>
+        <p className="hint">
+          The command above just fetches this and runs it. Downloading through a
+          browser works too, but macOS quarantines anything saved that way and will
+          refuse to open the installer — you'd need{" "}
+          <code>xattr -dr com.apple.quarantine .</code> in the unpacked folder first.
+          Files fetched with <code>curl</code> carry no such tag, which is the only
+          reason the one-liner exists.
+        </p>
+        <a className="btn btn-ghost" href={bundleUrl}>
+          Download narrator (.zip)
+        </a>
+      </details>
 
       <h2>This app</h2>
       <InstallCard />
