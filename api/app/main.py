@@ -919,17 +919,24 @@ trap 'rm -rf "$TMP"' EXIT
 printf '\\nDownloading the narrator from %s\\n' "$API"
 curl -fsSL "$API/api/worker/bundle?key={key}" -o "$TMP/bundle.zip"
 
-# ditto over unzip: it is present on a stock macOS and preserves the
-# executable bit that the installer needs.
-if command -v ditto >/dev/null 2>&1; then
+# ditto is preferred on macOS for extended attributes, but it does NOT carry a
+# zip's executable bit across — verified: ditto yields rw-r--r--, unzip yields
+# rwx. Either way the script is invoked through sh below, so the mode cannot
+# decide whether the install works.
+if command -v unzip >/dev/null 2>&1; then
+  mkdir -p "$TMP/unpacked" && unzip -q "$TMP/bundle.zip" -d "$TMP/unpacked"
+elif command -v ditto >/dev/null 2>&1; then
   ditto -x -k "$TMP/bundle.zip" "$TMP/unpacked"
 else
-  mkdir -p "$TMP/unpacked" && unzip -q "$TMP/bundle.zip" -d "$TMP/unpacked"
+  printf 'Need unzip or ditto to unpack the bundle.\n' >&2
+  exit 1
 fi
 
 cd "$TMP/unpacked/vocalis-worker"
-chmod +x install.sh
-exec ./install.sh
+chmod +x install.sh 2>/dev/null || true
+# Through sh, not ./install.sh: an extractor that dropped the executable bit
+# would otherwise stop the install with "permission denied".
+exec sh install.sh
 """
     return Response(script, media_type="text/x-shellscript")
 
