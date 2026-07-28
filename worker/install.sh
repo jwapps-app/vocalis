@@ -40,7 +40,12 @@ die() { printf '\nError: %s\n' "$*" >&2; exit 1; }
 # anywhere without a controlling terminal.
 DB_PASSWORD=""
 if { exec 3<>/dev/tty; } 2>/dev/null; then
-  printf 'Database password (POSTGRES_PASSWORD from the Vocalis server): ' >&3
+  # Say that the input is hidden. Without it a pasted password produces no
+  # visible change whatsoever, which is indistinguishable from the paste having
+  # failed — and the passwords this prompt asks for are generated ones nobody
+  # is going to retype by hand.
+  printf 'Database password (POSTGRES_PASSWORD from the Vocalis server).\n' >&3
+  printf 'Paste it and press Return — it stays hidden as you type: ' >&3
   if stty -echo <&3 2>/dev/null; then
     read -r DB_PASSWORD <&3
     stty echo <&3 2>/dev/null
