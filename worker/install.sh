@@ -30,13 +30,33 @@ die() { printf '\nError: %s\n' "$*" >&2; exit 1; }
 # reach the server. Ask for it here instead — it is the POSTGRES_PASSWORD from
 # the server's .env. Carried as PGPASSWORD, which libpq reads by itself, so it
 # never has to be URL-encoded into a connection string.
-printf 'Database password (POSTGRES_PASSWORD from the Vocalis server): '
-if stty -echo 2>/dev/null; then
-  read -r DB_PASSWORD; stty echo; printf '\n'
-else
-  read -r DB_PASSWORD
+# Read from the terminal, not stdin. Run as `curl … | sh`, stdin is the pipe
+# carrying this script and is already at end-of-file, so a plain `read` returns
+# nothing at once — the prompt appears and the installer exits in the same
+# breath, looking like it ignored you.
+#
+# Opening /dev/tty is attempted rather than tested for: `[ -r /dev/tty ]` is
+# true even where the device cannot actually be opened, which is the case
+# anywhere without a controlling terminal.
+DB_PASSWORD=""
+if { exec 3<>/dev/tty; } 2>/dev/null; then
+  printf 'Database password (POSTGRES_PASSWORD from the Vocalis server): ' >&3
+  if stty -echo <&3 2>/dev/null; then
+    read -r DB_PASSWORD <&3
+    stty echo <&3 2>/dev/null
+    printf '\n' >&3
+  else
+    read -r DB_PASSWORD <&3
+  fi
+  exec 3<&-
 fi
-[ -n "$DB_PASSWORD" ] || die "no password entered"
+
+# No terminal — a CI run, or both ends piped. Take it from the environment
+# rather than hanging on input nobody can supply.
+[ -n "$DB_PASSWORD" ] || DB_PASSWORD=${POSTGRES_PASSWORD:-}
+[ -n "$DB_PASSWORD" ] || die "no database password.
+
+Run this from a terminal, or set POSTGRES_PASSWORD in the environment first."
 
 # Books and finished audio move over HTTP, so this is the only other thing the
 # worker needs to know. The bundle names it; fall back to the database host,
