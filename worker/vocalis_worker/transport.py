@@ -39,6 +39,13 @@ def _url(path: str) -> str:
     return f"{config.API_URL.rstrip('/')}{path}"
 
 
+def _headers() -> dict:
+    """The narrator's credential. It cannot log in — it runs unattended on
+    another machine — so it presents a token the server issued and shipped
+    inside the worker bundle, which is itself behind the password."""
+    return {"X-Vocalis-Worker": config.WORKER_TOKEN} if config.WORKER_TOKEN else {}
+
+
 def download(path: str, dest: Path) -> bool:
     """Fetch a file to `dest`. False if the server says it does not exist.
 
@@ -48,7 +55,8 @@ def download(path: str, dest: Path) -> bool:
     dest.parent.mkdir(parents=True, exist_ok=True)
     tmp = dest.with_suffix(dest.suffix + ".part")
     try:
-        with urllib.request.urlopen(_url(path), timeout=TIMEOUT) as response:
+        request = urllib.request.Request(_url(path), headers=_headers())
+        with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
             tmp.write_bytes(response.read())
     except urllib.error.HTTPError as exc:
         tmp.unlink(missing_ok=True)
@@ -76,7 +84,8 @@ def upload(path: str, source: Path, field: str = "file") -> dict:
     ])
     request = urllib.request.Request(
         _url(path), data=body, method="POST",
-        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}",
+                 **_headers()},
     )
     try:
         with urllib.request.urlopen(request, timeout=TIMEOUT) as response:
@@ -91,7 +100,8 @@ def upload(path: str, source: Path, field: str = "file") -> dict:
 
 def reachable() -> bool:
     try:
-        with urllib.request.urlopen(_url("/api/narrators"), timeout=10):
+        probe = urllib.request.Request(_url("/api/narrators"), headers=_headers())
+        with urllib.request.urlopen(probe, timeout=10):
             return True
     except Exception:
         return False

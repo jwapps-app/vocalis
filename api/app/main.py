@@ -1,3 +1,4 @@
+import hmac
 import io
 import json
 import os
@@ -7,14 +8,25 @@ import zipfile
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, Response, StreamingResponse
+from fastapi import (Body, FastAPI, File, Form, HTTPException, Request,
+                     UploadFile, status)
+from fastapi.responses import (FileResponse, JSONResponse, Response,
+                               StreamingResponse)
 
 from vocalis_core.epub_parse import parse_epub
 from vocalis_core.text_clean import clean_text, find_citations
 
 from .db import pool
 from .narrators import list_narrators, resolve
+from .security import (
+    SESSION_DAYS,
+    is_configured,
+    mint_session,
+    set_password,
+    session_valid,
+    verify_password,
+    worker_token,
+)
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 
@@ -59,6 +71,42 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(title="Vocalis API", lifespan=lifespan)
 
+# Reachable without a session. Everything else is closed.
+PUBLIC_PATHS = {
+    "/api/auth/status",
+    "/api/auth/setup",
+    "/api/auth/login",
+    "/api/auth/logout",
+}
+
+
+@app.middleware("http")
+async def authenticate(request: Request, call_next):
+    """Require a session on every route except the handful named above.
+
+    A middleware rather than a dependency on each route: with two dozen
+    endpoints, the failure mode of the per-route approach is that a new one
+    silently ships unprotected, and nothing about it looks wrong in review.
+    Here the default is closed and exposing something takes a deliberate edit
+    to PUBLIC_PATHS.
+    """
+    path = request.url.path
+    if not path.startswith("/api/") or path in PUBLIC_PATHS:
+        return await call_next(request)
+
+    # Open until a password exists, so the first visit can set one.
+    if not is_configured():
+        return await call_next(request)
+
+    worker_header = request.headers.get("x-vocalis-worker")
+    if worker_header and hmac.compare_digest(worker_header, worker_token()):
+        return await call_next(request)
+
+    session = request.cookies.get(SESSION_COOKIE)
+    if session and session_valid(session):
+        return await call_next(request)
+    return JSONResponse({"detail": "Not authenticated"}, status_code=401)
+
 JOB_COLUMNS = """
     id, status, epub_filename, title, author, seed, narrator, mode, chapters,
     concurrency, cancel_requested,
@@ -90,6 +138,70 @@ WORKER_STALE_SECONDS = 30
 # The port the web UI is published on, so the bundle can tell the worker where
 # to fetch books from. Matches WEB_PORT in the compose file.
 WEB_PORT = os.environ.get("WEB_PORT", "8091")
+
+
+# ------------------------------------------------------------------- auth
+#
+# Left open until a password exists, so the first visit can set one — the same
+# first-run flow Portainer uses. Nothing here requires editing a compose file
+# or fishing a generated password out of container logs.
+
+
+@app.get("/api/auth/status")
+def auth_status():
+    return {"configured": is_configured()}
+
+
+SESSION_COOKIE = "vocalis_session"
+
+
+def _issue_session(request: Request) -> JSONResponse:
+    """Hand back the session as a cookie rather than a token for the page to
+    hold.
+
+    Covers, voice previews and the finished audiobook are fetched by the
+    browser itself — <img src>, <audio>, a download link — and none of those
+    can carry an Authorization header. A cookie is sent on all of them without
+    the page being involved. SameSite=Lax keeps it off cross-site requests,
+    which is what a bearer token was buying.
+    """
+    response = JSONResponse({"ok": True})
+    response.set_cookie(
+        SESSION_COOKIE,
+        mint_session(),
+        max_age=SESSION_DAYS * 86400,
+        httponly=True,
+        samesite="lax",
+        # Only over TLS, where there is TLS. Setting it unconditionally would
+        # make the cookie silently unusable on a plain-HTTP LAN install.
+        secure=request.headers.get("x-forwarded-proto", request.url.scheme) == "https",
+        path="/",
+    )
+    return response
+
+
+@app.post("/api/auth/setup", status_code=201)
+def auth_setup(request: Request, password: str = Body(..., embed=True)):
+    """Choose the password, once. Refuses to overwrite an existing one, or
+    anyone who can reach the port could take the instance over."""
+    if is_configured():
+        raise HTTPException(409, "A password is already set")
+    set_password(password)
+    return _issue_session(request)
+
+
+@app.post("/api/auth/login")
+def auth_login(request: Request, password: str = Body(..., embed=True)):
+    if not verify_password(password):
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong password")
+    return _issue_session(request)
+
+
+@app.post("/api/auth/logout")
+def auth_logout():
+    response = JSONResponse({"ok": True})
+    response.delete_cookie(SESSION_COOKIE, path="/")
+    return response
 
 
 # ---------------------------------------------------------------- narrators
@@ -794,6 +906,11 @@ def worker_bundle(request: Request):
         "# Books come down from here and finished audio goes back the same way,\n"
         "# so there is no shared folder to mount or keep in step.\n"
         f"VOCALIS_API_URL={_public_api_url(request)}\n"
+        "\n"
+        "# The narrator's credential. It runs unattended and cannot log in, so\n"
+        "# it presents this instead. Downloading this bundle requires being\n"
+        "# logged in, which is what keeps the token from being handed out.\n"
+        f"VOCALIS_WORKER_TOKEN={worker_token()}\n"
     )
 
     buf = io.BytesIO()

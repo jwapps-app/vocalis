@@ -13,6 +13,10 @@ DATABASE_URL = os.environ.get(
 # and in particular there is no shared directory to mount or keep in step.
 API_URL = os.environ.get("VOCALIS_API_URL", "http://127.0.0.1:8091")
 
+# Issued by the server and written into the worker bundle. Empty when the
+# server has no password set, which is only true before first-run setup.
+WORKER_TOKEN = os.environ.get("VOCALIS_WORKER_TOKEN", "")
+
 # Purely local scratch: downloaded books, chapter audio, the assembled file
 # before it is uploaded. Nothing here is shared with the API, so it belongs on
 # fast local disk rather than on a share.

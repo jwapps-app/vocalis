@@ -136,6 +136,7 @@ if [ "$OS" = mac ]; then
         <key>DATABASE_URL</key><string>$DATABASE_URL</string>
         <key>PGPASSWORD</key><string>$DB_PASSWORD</string>
         <key>VOCALIS_API_URL</key><string>$VOCALIS_API_URL</string>
+        <key>VOCALIS_WORKER_TOKEN</key><string>${VOCALIS_WORKER_TOKEN:-}</string>
         <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
     </dict>
     <key>RunAtLoad</key><true/>
@@ -175,6 +176,7 @@ WorkingDirectory=$HERE/worker
 Environment=DATABASE_URL=$DATABASE_URL
 Environment=PGPASSWORD=$DB_PASSWORD
 Environment=VOCALIS_API_URL=$VOCALIS_API_URL
+Environment=VOCALIS_WORKER_TOKEN=${VOCALIS_WORKER_TOKEN:-}
 Restart=always
 RestartSec=5
 

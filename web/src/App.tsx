@@ -11,10 +11,11 @@ import {
   Narrator,
 } from "./api";
 import EditChapters from "./EditChapters";
+import Login from "./Login";
 import Review from "./Review";
 import Setup from "./Setup";
 import { InstallButton } from "./Install";
-import { getWorker, Worker } from "./api";
+import { getWorker, logout, Unauthorized, Worker } from "./api";
 
 const ACTIVE = new Set(["queued", "parsing", "synthesizing", "assembling"]);
 
@@ -255,6 +256,9 @@ export default function App() {
   );
   const [worker, setWorker] = useState<Worker | null>(null);
   const [workerLoaded, setWorkerLoaded] = useState(false);
+  // null while unknown, so the login screen does not flash before we know
+  // whether the server even wants one.
+  const [authed, setAuthed] = useState<boolean | null>(null);
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -275,7 +279,16 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
-  const refreshJobs = () => listJobs().then(setJobs).catch(() => {});
+  const refreshJobs = () =>
+    listJobs().then(
+      (j) => {
+        setJobs(j);
+        setAuthed(true);
+      },
+      (err) => {
+        if (err instanceof Unauthorized) setAuthed(false);
+      }
+    );
 
   useEffect(() => {
     refreshJobs();
@@ -313,6 +326,21 @@ export default function App() {
   // narrate it. A green narrator or an empty queue needs no banner.
   const stalled = offline && waiting > 0;
 
+  if (authed === false) {
+    return (
+      <div className="page">
+        <header className="masthead">
+          <img className="logo" src="/icon.svg" alt="" width="52" height="52" />
+          <div>
+            <h1>Vocalis</h1>
+            <p className="tagline">EPUB to audiobook, narrated locally.</p>
+          </div>
+        </header>
+        <Login onAuthenticated={() => { setAuthed(true); refreshJobs(); }} />
+      </div>
+    );
+  }
+
   return (
     <div className="page">
       <header className="masthead">
@@ -336,6 +364,16 @@ export default function App() {
           >
             <span className={`tab-dot ${worker?.online ? "on" : "off"}`} />
             Setup
+          </button>
+          <button
+            className="tab"
+            onClick={async () => {
+              await logout().catch(() => {});
+              setAuthed(false);
+            }}
+            title="Sign out"
+          >
+            Sign out
           </button>
         </nav>
       </header>

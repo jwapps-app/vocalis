@@ -69,8 +69,17 @@ export interface Worker {
   online: boolean;
 }
 
+/** Raised when the server rejects the session, so the app can show the login
+ *  screen instead of a generic error on every panel.
+ *
+ *  The session itself is an HttpOnly cookie the browser sends on its own —
+ *  including on <img>, <audio> and download links, which cannot carry a header.
+ *  Nothing is stored here. */
+export class Unauthorized extends Error {}
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
+  if (res.status === 401) throw new Unauthorized("Not authenticated");
   if (!res.ok) {
     let detail = `${res.status}`;
     try {
@@ -82,6 +91,22 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   }
   return res.json();
 }
+
+export const authStatus = () => req<{ configured: boolean }>("/api/auth/status");
+
+async function authenticate(path: string, password: string): Promise<void> {
+  await req<{ ok: boolean }>(path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ password }),
+  });
+}
+
+export const logout = () => req<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
+
+export const login = (password: string) => authenticate("/api/auth/login", password);
+export const setupPassword = (password: string) =>
+  authenticate("/api/auth/setup", password);
 
 export const previewUrl = (id: string) => `/api/narrators/${id}/preview`;
 export const coverUrl = (jobId: string) => `/api/jobs/${jobId}/cover`;

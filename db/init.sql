@@ -84,3 +84,26 @@ CREATE TABLE workers (
   version      TEXT,
   last_seen    TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Single-row table holding the instance's own secrets.
+--
+-- Vocalis has one user, so there is no accounts table — but the password still
+-- needs somewhere to live that is not the compose file. Keeping it here rather
+-- than in an environment variable means it can be set from the browser on
+-- first run, the way Portainer does it: no editing .env, no reading a
+-- generated password out of container logs, and nothing secret sitting in a
+-- file that gets pasted into a forum post when someone asks for help.
+-- The secrets are filled in by the API on first start rather than here:
+-- gen_random_bytes() lives in pgcrypto, and requiring an extension to stand up
+-- a schema is a needless way for a fresh deployment to fail.
+CREATE TABLE instance (
+  id                 BOOLEAN PRIMARY KEY DEFAULT true CHECK (id),
+  password_hash      TEXT,
+  -- Signs browser sessions. Generated once; rotating it logs everyone out.
+  secret_key         TEXT,
+  -- Presented by the narrator instead of a login, since it fetches books with
+  -- curl and cannot fill in a form. Travels in the worker bundle, which is
+  -- itself behind the password.
+  worker_token       TEXT,
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
