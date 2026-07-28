@@ -63,8 +63,40 @@ def seed_data_dir() -> None:
         print(f"Seeded {seeded} narrator file(s) into {DATA_DIR / 'narrators'}", flush=True)
 
 
+# Schema added after the first release. db/init.sql only runs against an empty
+# volume, so an existing installation upgrading by `docker compose pull` would
+# otherwise keep a database with no `instance` table — and every request would
+# fail inside the auth check, which is a worse failure than the feature simply
+# being absent. Written to be safe to run on every start.
+MIGRATIONS = [
+    """
+    CREATE TABLE IF NOT EXISTS instance (
+      id            BOOLEAN PRIMARY KEY DEFAULT true CHECK (id),
+      password_hash TEXT,
+      secret_key    TEXT,
+      worker_token  TEXT,
+      created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+    """,
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS drop_citations BOOLEAN NOT NULL DEFAULT false",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS work_seconds REAL NOT NULL DEFAULT 0",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS audio_seconds REAL",
+    "ALTER TABLE workers ADD COLUMN IF NOT EXISTS free_gpu_gb REAL",
+]
+
+
+def migrate() -> None:
+    with pool.connection() as conn:
+        for statement in MIGRATIONS:
+            try:
+                conn.execute(statement)
+            except Exception as exc:   # noqa: BLE001 - one bad step must not stop the rest
+                print(f"migration skipped ({exc})", flush=True)
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    migrate()
     seed_data_dir()
     yield
 

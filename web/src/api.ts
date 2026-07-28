@@ -77,6 +77,21 @@ export interface Worker {
  *  Nothing is stored here. */
 export class Unauthorized extends Error {}
 
+/** Reject a promise that takes too long.
+ *
+ *  fetch has no default timeout, so a server that accepts the connection and
+ *  then never replies leaves the caller waiting forever. That is exactly what
+ *  a half-started container does, and it is what turned an unhealthy API into
+ *  a blank page rather than a message. */
+export function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error("The server did not respond.")), ms)
+    ),
+  ]);
+}
+
 async function req<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init);
   if (res.status === 401) throw new Unauthorized("Not authenticated");

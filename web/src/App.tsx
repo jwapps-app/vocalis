@@ -15,7 +15,7 @@ import Login from "./Login";
 import Review from "./Review";
 import Setup from "./Setup";
 import { InstallButton } from "./Install";
-import { authStatus, getWorker, logout, Unauthorized, Worker } from "./api";
+import { authStatus, getWorker, logout, Unauthorized, withTimeout, Worker } from "./api";
 
 const ACTIVE = new Set(["queued", "parsing", "synthesizing", "assembling"]);
 
@@ -267,7 +267,9 @@ export default function App() {
    * unconfigured server answers every request, so nothing ever returned 401
    * and the first-run screen was unreachable. A new install would run wide
    * open and never mention it. */
-  const [gate, setGate] = useState<"loading" | "setup" | "login" | "ready">("loading");
+  const [gate, setGate] = useState<
+    "loading" | "setup" | "login" | "ready" | "unreachable"
+  >("loading");
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -298,17 +300,23 @@ export default function App() {
 
   // Asked once at startup, and again after signing out: is there a password at
   // all, and does this browser hold a session?
-  const checkGate = () =>
-    authStatus().then(
-      ({ configured }) => {
-        if (!configured) return setGate("setup");
-        return listJobs().then(
-          () => setGate("ready"),
-          (err) => setGate(err instanceof Unauthorized ? "login" : "ready")
-        );
-      },
-      () => setGate("ready")   // server unreachable; the panels report it
-    );
+  const checkGate = async () => {
+    try {
+      // Bounded: a request that never settles used to leave the app rendering
+      // nothing at all — a blank page, with no error and nothing to retry.
+      // A server that hangs is commoner than one that refuses.
+      const { configured } = await withTimeout(authStatus(), 8000);
+      if (!configured) return setGate("setup");
+      try {
+        await withTimeout(listJobs(), 8000);
+        setGate("ready");
+      } catch (err) {
+        setGate(err instanceof Unauthorized ? "login" : "unreachable");
+      }
+    } catch {
+      setGate("unreachable");
+    }
+  };
 
   useEffect(() => {
     checkGate();
@@ -350,7 +358,41 @@ export default function App() {
   // narrate it. A green narrator or an empty queue needs no banner.
   const stalled = offline && waiting > 0;
 
-  if (gate === "loading") return null;
+  if (gate === "loading") {
+    return (
+      <div className="page">
+        <p className="hint">Connecting…</p>
+      </div>
+    );
+  }
+
+  if (gate === "unreachable") {
+    return (
+      <div className="page">
+        <header className="masthead">
+          <img className="logo" src="/icon.svg" alt="" width="52" height="52" />
+          <div>
+            <h1>Vocalis</h1>
+            <p className="tagline">EPUB to audiobook, narrated locally.</p>
+          </div>
+        </header>
+        <section className="card">
+          <h2>Can't reach the server</h2>
+          <p className="hint">
+            The page loaded but the API did not answer. The <code>api</code> container
+            is probably down or still starting — its log will say which. Vocalis will
+            not work until it responds.
+          </p>
+          <button type="button" className="btn btn-primary" onClick={() => {
+            setGate("loading");
+            checkGate();
+          }}>
+            Try again
+          </button>
+        </section>
+      </div>
+    );
+  }
 
   if (gate === "setup" || gate === "login") {
     return (
