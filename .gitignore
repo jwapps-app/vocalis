@@ -12,6 +12,14 @@ data/
 *.mp3
 *.m4a
 
+# ...except the bundled narrator voices, which are part of the product rather
+# than user data. Shipping them is what lets a fresh deploy work with nothing
+# but compose and .env: they were synthesized once with Kokoro-82M (Apache-2.0)
+# and regenerating them would mean installing Kokoro, espeak-ng and a spaCy
+# model on the worker for a one-time job.
+!assets/narrators/*.wav
+!assets/narrators/previews/*.wav
+
 # Editor and tooling state
 .vscode/
 .idea/

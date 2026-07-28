@@ -13,6 +13,10 @@ RUN pip install --no-cache-dir /core
 COPY core /srv/bundle/core
 COPY worker /srv/bundle/worker
 
+# Narrator voices, seeded into the data directory on first start so a fresh
+# deployment has a working dropdown without anyone copying files in by hand.
+COPY assets /srv/assets
+
 COPY api/app ./app
 
 EXPOSE 8000

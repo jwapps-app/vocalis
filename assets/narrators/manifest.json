@@ -1,0 +1,74 @@
+{
+  "narrators": [
+    {
+      "id": "michael",
+      "name": "Michael",
+      "description": "American male, even mid-range delivery",
+      "ref": "narrators/michael.wav",
+      "params": {}
+    },
+    {
+      "id": "puck",
+      "name": "Puck",
+      "description": "American male, lighter and wry",
+      "ref": "narrators/puck.wav",
+      "params": {}
+    },
+    {
+      "id": "adam",
+      "name": "Adam",
+      "description": "American male, deep",
+      "ref": "narrators/adam.wav",
+      "params": {}
+    },
+    {
+      "id": "onyx",
+      "name": "Onyx",
+      "description": "American male, deep and resonant",
+      "ref": "narrators/onyx.wav",
+      "params": {}
+    },
+    {
+      "id": "george",
+      "name": "George",
+      "description": "British male, warm",
+      "ref": "narrators/george.wav",
+      "params": {}
+    },
+    {
+      "id": "lewis",
+      "name": "Lewis",
+      "description": "British male, lower and gravelly",
+      "ref": "narrators/lewis.wav",
+      "params": {}
+    },
+    {
+      "id": "heart",
+      "name": "Heart",
+      "description": "American female, warm and expressive",
+      "ref": "narrators/heart.wav",
+      "params": {}
+    },
+    {
+      "id": "bella",
+      "name": "Bella",
+      "description": "American female, bright",
+      "ref": "narrators/bella.wav",
+      "params": {}
+    },
+    {
+      "id": "sarah",
+      "name": "Sarah",
+      "description": "American female, composed",
+      "ref": "narrators/sarah.wav",
+      "params": {}
+    },
+    {
+      "id": "emma",
+      "name": "Emma",
+      "description": "British female, warm",
+      "ref": "narrators/emma.wav",
+      "params": {}
+    }
+  ]
+}

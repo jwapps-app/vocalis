@@ -17,6 +17,13 @@ docker compose up -d --build
 Web UI: <http://localhost:8091>. Postgres is exposed on `127.0.0.1:5445` for
 the native worker.
 
+Nothing else needs copying in. The ten narrator voices are baked into the API
+image and seeded into the data directory the first time the stack starts —
+file by file, never overwriting, so voices added later with `add_narrator.py`
+survive restarts. They were synthesized once with Kokoro-82M (Apache-2.0) and
+are shipped rather than generated because regenerating them would mean
+installing Kokoro, espeak-ng and a spaCy model for a one-time job.
+
 ## 2. Native worker (the machine with the GPU)
 
 The easiest install is from the running web UI: open **Setup**, download the

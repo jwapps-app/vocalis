@@ -4,6 +4,7 @@ import os
 import shutil
 import uuid
 import zipfile
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, Request, UploadFile
@@ -17,7 +18,46 @@ from .narrators import list_narrators, resolve
 
 DATA_DIR = Path(os.environ.get("DATA_DIR", "/data"))
 
-app = FastAPI(title="Vocalis API")
+# Narrator voices baked into the image, copied into the data directory the
+# first time the stack runs.
+ASSETS_DIR = Path(os.environ.get("ASSETS_DIR", "/srv/assets"))
+
+
+def seed_data_dir() -> None:
+    """Populate an empty data directory from the assets in the image.
+
+    A new deployment should work from compose and .env alone. Without this the
+    narrator dropdown is empty until someone hand-copies ten reference clips
+    from another machine — the one step that could not be automated away, and
+    the one most likely to be missed.
+
+    Copies file by file and never overwrites, so narrators added later with
+    add_narrator.py, and the manifest listing them, survive every restart.
+    """
+    source = ASSETS_DIR / "narrators"
+    if not source.is_dir():
+        return
+    seeded = 0
+    for path in source.rglob("*"):
+        if not path.is_file():
+            continue
+        target = DATA_DIR / "narrators" / path.relative_to(source)
+        if target.exists():
+            continue
+        target.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(path, target)
+        seeded += 1
+    if seeded:
+        print(f"Seeded {seeded} narrator file(s) into {DATA_DIR / 'narrators'}", flush=True)
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    seed_data_dir()
+    yield
+
+
+app = FastAPI(title="Vocalis API", lifespan=lifespan)
 
 JOB_COLUMNS = """
     id, status, epub_filename, title, author, seed, narrator, mode, chapters,
