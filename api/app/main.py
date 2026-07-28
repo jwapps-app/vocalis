@@ -130,8 +130,12 @@ async def authenticate(request: Request, call_next):
     if not is_configured():
         return await call_next(request)
 
-    worker_header = request.headers.get("x-vocalis-worker")
-    if worker_header and hmac.compare_digest(worker_header, worker_token()):
+    # Header for the running narrator; query parameter for enrolling one.
+    # `curl … | sh` cannot hold a session and cannot be given a header by the
+    # person pasting it, so the command shown on the setup page — a page only
+    # reachable once logged in — carries the key in its URL instead.
+    presented = request.headers.get("x-vocalis-worker") or request.query_params.get("key")
+    if presented and hmac.compare_digest(presented, worker_token()):
         return await call_next(request)
 
     session = request.cookies.get(SESSION_COOKIE)
@@ -861,7 +865,7 @@ def _public_api_url(request: Request) -> str:
 
 
 @app.get("/api/worker")
-def worker_status():
+def worker_status(request: Request):
     """What the setup page shows: is a narrator connected, and on what hardware."""
     with pool.connection() as conn:
         row = conn.execute(
@@ -873,7 +877,14 @@ def worker_status():
             """,
             (WORKER_STALE_SECONDS,),
         ).fetchone()
-    return {"worker": row}
+    return {
+        "worker": row,
+        # Built here so the page never has to assemble an address or a key.
+        "install_command": (
+            f"curl -fsSL {_public_api_url(request)}"
+            f"/api/worker/install?key={worker_token()} | sh"
+        ),
+    }
 
 
 @app.get("/api/worker/install")
@@ -893,6 +904,7 @@ def worker_install_script(request: Request):
     script cannot disagree with the page it was copied from.
     """
     api = _public_api_url(request)
+    key = worker_token()
     script = f"""#!/bin/sh
 # Vocalis narrator installer. Fetches the worker bundle from {api} and runs it.
 set -eu
@@ -902,7 +914,7 @@ TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
 printf '\\nDownloading the narrator from %s\\n' "$API"
-curl -fsSL "$API/api/worker/bundle" -o "$TMP/bundle.zip"
+curl -fsSL "$API/api/worker/bundle?key={key}" -o "$TMP/bundle.zip"
 
 # ditto over unzip: it is present on a stock macOS and preserves the
 # executable bit that the installer needs.

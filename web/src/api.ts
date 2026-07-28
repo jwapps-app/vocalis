@@ -165,7 +165,8 @@ export const getRecorded = (jobId: string) =>
   req<{ indexes: number[] }>(`/api/jobs/${jobId}/recorded`);
 
 export const bundleUrl = "/api/worker/bundle";
-export const getWorker = () => req<{ worker: Worker | null }>("/api/worker");
+export const getWorker = () =>
+  req<{ worker: Worker | null; install_command: string }>("/api/worker");
 
 export const listNarrators = () => req<Narrator[]>("/api/narrators");
 export const listJobs = () => req<Job[]>("/api/jobs");

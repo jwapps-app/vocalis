@@ -77,9 +77,8 @@ function StatusPanel({ worker }: { worker: Worker | null }) {
  *  reached at. Anything derived from server configuration can disagree with
  *  reality: a stack published on one port while the container believes another
  *  hands out an installer pointing somewhere else entirely. */
-function InstallCommand() {
+function InstallCommand({ command }: { command: string }) {
   const [copied, setCopied] = useState(false);
-  const command = `curl -fsSL ${window.location.origin}/api/worker/install | sh`;
 
   async function copy() {
     try {
@@ -103,12 +102,18 @@ function InstallCommand() {
 
 export default function Setup() {
   const [worker, setWorker] = useState<Worker | null>(null);
+  // Comes from the server complete with the address and the enrolment key, so
+  // this page never has to assemble either.
+  const [installCommand, setInstallCommand] = useState("");
   const [loaded, setLoaded] = useState(false);
 
   useEffect(() => {
     const tick = () =>
       getWorker()
-        .then((r) => setWorker(r.worker))
+        .then((r) => {
+          setWorker(r.worker);
+          setInstallCommand(r.install_command);
+        })
         .catch(() => {})
         .finally(() => setLoaded(true));
     tick();
@@ -135,7 +140,7 @@ export default function Setup() {
             Paste it into a terminal there. It asks for one thing — the database
             password from this server's <code>.env</code> — and works out the rest.
           </p>
-          <InstallCommand />
+          {installCommand && <InstallCommand command={installCommand} />}
           <p className="hint">
             It finds a Python version the voice model supports, installs{" "}
             <code>ffmpeg</code> if it's missing, downloads the model, and registers a
