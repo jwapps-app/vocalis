@@ -26,11 +26,26 @@ installing Kokoro, espeak-ng and a spaCy model for a one-time job.
 
 ## 2. Native worker (the machine with the GPU)
 
-The easiest install is from the running web UI: open **Setup**, download the
-worker bundle (already pointed at this server via a generated `.env`), unpack
-it, and run `./install.sh`. It builds the venv, installs the stack, and
-registers the launchd/systemd service. The manual steps below are the same
-thing by hand.
+Open **Setup** in the web UI, download the worker bundle, unzip it, and
+double-click **Install Vocalis Narrator** — or run `./install.sh`. The only
+question it asks is the database password.
+
+Everything else it works out. It finds a Python version PyTorch actually
+supports (the system `python3` is routinely too new — 3.13 on a current Mac,
+where the install dies partway through with a compiler error and no mention of
+versions), fetching one only if the machine has none. It installs `ffmpeg` if
+Homebrew is present. And it locates the shared data directory rather than
+asking: the server's own path when the worker runs on that machine, otherwise
+by looking for the narrator voices under the mounted shares. Asking would only
+invite a plausible wrong answer that surfaces much later as a job unable to
+find its book.
+
+When the data directory is a network share it also registers a login agent to
+remount it, because macOS does not bring an SMB mount back after a restart —
+and the worker itself waits for the share rather than starting without it. That
+matters more than it sounds: every `mkdir(parents=True)` in the pipeline would
+otherwise recreate the tree *underneath* an empty mount point and quietly fill
+the startup disk with audio nobody can find.
 
 The Setup page also shows whether a narrator is **connected** and on what
 hardware, read from a `workers` heartbeat row the worker upserts every poll —

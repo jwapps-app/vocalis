@@ -394,15 +394,49 @@ def _exit_on_sigterm(signum, frame):
     raise SystemExit(0)
 
 
+def data_dir_ready() -> bool:
+    """Whether the shared data directory is really there.
+
+    Tests for a file the server seeds rather than for the directory itself,
+    because the common failure is an unmounted network share: the mount point
+    still exists as an empty folder, and every mkdir(parents=True) below would
+    cheerfully write a whole book's audio onto the local disk underneath it —
+    invisible until someone wonders why the share is empty and the startup disk
+    is full.
+    """
+    return (config.DATA_DIR / "narrators" / "manifest.json").is_file()
+
+
+def await_data_dir() -> None:
+    """Wait for the share to appear instead of failing at boot.
+
+    A worker set to start at login usually beats the network share it depends
+    on, and on macOS an SMB mount does not come back on its own after a
+    restart. Waiting turns 'permanently broken until someone notices' into
+    'starts working the moment the share is mounted'.
+    """
+    if data_dir_ready():
+        return
+    log.warning("Waiting for the data folder at %s — mount the share and this "
+                "will continue on its own", config.DATA_DIR)
+    while not data_dir_ready():
+        time.sleep(10)
+    log.info("Data folder available")
+
+
 def run() -> None:
     logging.basicConfig(level=logging.INFO,
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
     log.info("Worker ready (data=%s)", config.DATA_DIR)
+    await_data_dir()
 
     startup = True
     while True:
         try:
+            # Re-checked every pass: a share can disappear mid-run when the
+            # server reboots or the network drops.
+            await_data_dir()
             with connect() as conn:
                 if startup:
                     requeue_orphans(conn)

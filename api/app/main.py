@@ -649,8 +649,15 @@ def worker_bundle(request: Request):
         "# The password is left out on purpose: this file travels over the\n"
         "# network, so install.sh asks for it on the machine that needs it.\n"
         f"DATABASE_URL={_worker_db_url()}\n"
-        "# Where the worker keeps voice models and cached audio.\n"
-        "VOCALIS_DATA_DIR=$HOME/vocalis-data\n"
+        "\n"
+        "# Where this server keeps its data directory. The worker has to read and\n"
+        "# write the same folder, so install.sh uses this to locate it — the same\n"
+        "# path when the worker runs on this machine, otherwise the tail of\n"
+        "# whatever mount point the share appears at.\n"
+        f"VOCALIS_SERVER_DATA_DIR={os.environ.get('HOST_DATA_DIR', '')}\n"
+        "\n"
+        "# Set this only to override what install.sh works out for itself.\n"
+        "#VOCALIS_DATA_DIR=\n"
     )
 
     buf = io.BytesIO()
@@ -670,11 +677,19 @@ def worker_bundle(request: Request):
             # sit at the bundle root beside core/, worker/ and .env — hoist it
             # out of worker/ so `./install.sh` just works after unpacking.
             arc = Path("vocalis-worker")
-            arc = arc / ("install.sh" if name.as_posix() == "worker/install.sh" else name)
+            hoist = {"worker/install.sh": "install.sh",
+                     "worker/Install Vocalis Narrator.command":
+                         "Install Vocalis Narrator.command"}
+            arc = arc / hoist.get(name.as_posix(), name)
             z.write(path, arc)
         z.writestr("vocalis-worker/.env", env)
-        info = z.getinfo("vocalis-worker/install.sh")
-        info.external_attr = 0o755 << 16  # keep the installer executable
+        for entry in ("install.sh", "Install Vocalis Narrator.command"):
+            try:
+                # Both must stay executable, or Finder opens the .command in a
+                # text editor and the shell refuses install.sh.
+                z.getinfo(f"vocalis-worker/{entry}").external_attr = 0o755 << 16
+            except KeyError:
+                pass
     buf.seek(0)
     return StreamingResponse(
         buf,
