@@ -33,7 +33,13 @@ services:
   api:
     image: ghcr.io/jwapps-app/vocalis-api:${VOCALIS_TAG:-latest}
     environment:
-      DATABASE_URL: postgresql://vocalis:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — see .env.example}@db:5432/vocalis
+      # The password is passed separately, never interpolated into the URL.
+      # A generated password routinely contains '/' or '+' — openssl rand
+      # -base64 emits both — and '/' terminates the authority section of a URI,
+      # so the URL silently reparses with the *username* as the hostname. libpq
+      # reads PGPASSWORD on its own, so nothing has to be escaped.
+      DATABASE_URL: postgresql://vocalis@db:5432/vocalis
+      PGPASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — see .env.example}
       DATA_DIR: /data
       # Where the GPU machine reaches Postgres. Baked into the worker bundle
       # the Setup page hands out, so it must be an address that machine can
