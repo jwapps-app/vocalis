@@ -6,9 +6,11 @@ services:
       POSTGRES_USER: vocalis
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env — see .env.example}
     ports:
-      # Exposed on localhost so the native TTS worker on the host can
-      # connect. Host port 5445 — 5432/33/34/36/42 are taken by other fleet DBs.
-      - "127.0.0.1:5445:5432"
+      # The native TTS worker connects here. Loopback by default so the
+      # database is not on the network at all; set DB_BIND=0.0.0.0 when the
+      # worker runs on a different machine from this stack — at which point the
+      # password is the only thing protecting it, so make it a real one.
+      - "${DB_BIND:-127.0.0.1}:5445:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
       - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
