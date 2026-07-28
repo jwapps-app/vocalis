@@ -80,17 +80,21 @@ esac
 # version known to work, from wherever one already exists, and fetch one only
 # if none does.
 supported() {
-  "$1" -c 'import sys; raise SystemExit(0 if (3,10) <= sys.version_info < (3,13) else 1)' 2>/dev/null
+  # Lower bound is core/pyproject.toml's requires-python, not a guess: accepting
+  # 3.10 meant the venv was built and PyTorch downloaded before pip refused
+  # vocalis-core, several minutes in and with a message about a package rather
+  # than about the interpreter. Upper bound is what PyTorch supports.
+  "$1" -c 'import sys; raise SystemExit(0 if (3,11) <= sys.version_info < (3,13) else 1)' 2>/dev/null
 }
 
 find_python() {
   [ -n "${PYTHON:-}" ] && { printf '%s' "$PYTHON"; return; }
-  for candidate in python3.12 python3.11 python3.10 python3; do
+  for candidate in python3.12 python3.11 python3; do
     full=$(command -v "$candidate" 2>/dev/null) || continue
     supported "$full" && { printf '%s' "$full"; return; }
   done
   # uv keeps interpreters outside PATH; a matching one is often already there.
-  for full in "$HOME"/.local/share/uv/python/cpython-3.1[012]*/bin/python3.1[012]; do
+  for full in "$HOME"/.local/share/uv/python/cpython-3.1[12]*/bin/python3.1[12]; do
     [ -x "$full" ] && supported "$full" && { printf '%s' "$full"; return; }
   done
   printf ''
