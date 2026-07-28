@@ -880,9 +880,12 @@ def worker_status(request: Request):
     return {
         "worker": row,
         # Built here so the page never has to assemble an address or a key.
+        # Quoted: zsh is the default shell on macOS and treats '?' as a glob,
+        # so an unquoted URL with a query string fails with "no matches found"
+        # before curl is ever reached.
         "install_command": (
-            f"curl -fsSL {_public_api_url(request)}"
-            f"/api/worker/install?key={worker_token()} | sh"
+            f'curl -fsSL "{_public_api_url(request)}'
+            f'/api/worker/install?key={worker_token()}" | sh'
         ),
     }
 
