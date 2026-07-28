@@ -15,7 +15,7 @@ import Login from "./Login";
 import Review from "./Review";
 import Setup from "./Setup";
 import { InstallButton } from "./Install";
-import { getWorker, logout, Unauthorized, Worker } from "./api";
+import { authStatus, getWorker, logout, Unauthorized, Worker } from "./api";
 
 const ACTIVE = new Set(["queued", "parsing", "synthesizing", "assembling"]);
 
@@ -256,9 +256,18 @@ export default function App() {
   );
   const [worker, setWorker] = useState<Worker | null>(null);
   const [workerLoaded, setWorkerLoaded] = useState(false);
-  // null while unknown, so the login screen does not flash before we know
-  // whether the server even wants one.
-  const [authed, setAuthed] = useState<boolean | null>(null);
+  /* Where the app is before it will show anything.
+   *
+   *   loading — still asking the server
+   *   setup   — no password exists yet; choose one
+   *   login   — a password exists and this browser has no session
+   *   ready   — go ahead
+   *
+   * A plain boolean could not express "setup", and that mattered: an
+   * unconfigured server answers every request, so nothing ever returned 401
+   * and the first-run screen was unreachable. A new install would run wide
+   * open and never mention it. */
+  const [gate, setGate] = useState<"loading" | "setup" | "login" | "ready">("loading");
   const fileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -281,14 +290,29 @@ export default function App() {
 
   const refreshJobs = () =>
     listJobs().then(
-      (j) => {
-        setJobs(j);
-        setAuthed(true);
-      },
+      (j) => setJobs(j),
       (err) => {
-        if (err instanceof Unauthorized) setAuthed(false);
+        if (err instanceof Unauthorized) setGate("login");
       }
     );
+
+  // Asked once at startup, and again after signing out: is there a password at
+  // all, and does this browser hold a session?
+  const checkGate = () =>
+    authStatus().then(
+      ({ configured }) => {
+        if (!configured) return setGate("setup");
+        return listJobs().then(
+          () => setGate("ready"),
+          (err) => setGate(err instanceof Unauthorized ? "login" : "ready")
+        );
+      },
+      () => setGate("ready")   // server unreachable; the panels report it
+    );
+
+  useEffect(() => {
+    checkGate();
+  }, []);
 
   useEffect(() => {
     refreshJobs();
@@ -326,7 +350,9 @@ export default function App() {
   // narrate it. A green narrator or an empty queue needs no banner.
   const stalled = offline && waiting > 0;
 
-  if (authed === false) {
+  if (gate === "loading") return null;
+
+  if (gate === "setup" || gate === "login") {
     return (
       <div className="page">
         <header className="masthead">
@@ -336,7 +362,7 @@ export default function App() {
             <p className="tagline">EPUB to audiobook, narrated locally.</p>
           </div>
         </header>
-        <Login onAuthenticated={() => { setAuthed(true); refreshJobs(); }} />
+        <Login onAuthenticated={() => { setGate("ready"); refreshJobs(); }} />
       </div>
     );
   }
@@ -365,16 +391,18 @@ export default function App() {
             <span className={`tab-dot ${worker?.online ? "on" : "off"}`} />
             Setup
           </button>
-          <button
-            className="tab"
-            onClick={async () => {
-              await logout().catch(() => {});
-              setAuthed(false);
-            }}
-            title="Sign out"
-          >
-            Sign out
-          </button>
+          {gate === "ready" && (
+            <button
+              className="tab"
+              onClick={async () => {
+                await logout().catch(() => {});
+                await checkGate();
+              }}
+              title="Sign out"
+            >
+              Sign out
+            </button>
+          )}
         </nav>
       </header>
 
