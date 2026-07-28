@@ -71,6 +71,29 @@ if [ -z "${VOCALIS_API_URL:-}" ]; then
   VOCALIS_API_URL="http://$db_host:8091"
 fi
 
+
+# Check the credential before building anything on top of it.
+#
+# Without this the installer completes happily on a wrong password, writes it
+# into the service, and the only symptom is the setup page reporting the
+# narrator offline some minutes later — by which point the cause is several
+# steps behind you. A hidden prompt makes a wrong value easy to produce: paste
+# twice because nothing appeared on screen and the password is now doubled.
+verify_password() {
+  "$1" - <<'PYCHECK' 2>/dev/null
+import os, sys
+try:
+    import psycopg
+except ModuleNotFoundError:
+    sys.exit(2)          # cannot check yet; not a failure
+try:
+    psycopg.connect(os.environ["DATABASE_URL"], connect_timeout=8).close()
+except Exception as exc:
+    print(str(exc).strip().splitlines()[-1], file=sys.stderr)
+    sys.exit(1)
+PYCHECK
+}
+
 case "$(uname -s)" in
   Darwin) OS=mac ;;
   Linux)  OS=linux ;;
@@ -133,6 +156,19 @@ fi
 say "1/4  Creating the Python environment"
 "$PY" -m venv "$VENV"
 "$VENV/bin/pip" install --quiet --upgrade pip
+
+# psycopg first and alone: it installs in seconds and lets the password be
+# checked before committing to a multi-gigabyte download on a bad one.
+"$VENV/bin/pip" install --quiet "psycopg[binary]" >/dev/null 2>&1 || true
+if DATABASE_URL="$DATABASE_URL" PGPASSWORD="$DB_PASSWORD" verify_password "$VENV/bin/python"; then
+  say "Database password accepted"
+elif [ $? -eq 1 ]; then
+  die "the database rejected that password.
+
+Check POSTGRES_PASSWORD in the server's .env and run this again. If you pasted
+into the hidden prompt more than once, the value was joined together and will
+not match."
+fi
 
 say "2/4  Installing the narrator (this downloads PyTorch — several minutes)"
 "$VENV/bin/pip" install --quiet -r "$HERE/worker/requirements.txt"
