@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { bundleUrl, getWorker, Worker } from "./api";
 import { InstallCard } from "./Install";
 
@@ -78,23 +78,70 @@ function StatusPanel({ worker }: { worker: Worker | null }) {
  *  reality: a stack published on one port while the container believes another
  *  hands out an installer pointing somewhere else entirely. */
 function InstallCommand({ command }: { command: string }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<"idle" | "copied" | "select">("idle");
+  const box = useRef<HTMLPreElement>(null);
 
+  /** Copy, by whichever route this browser actually allows.
+   *
+   *  navigator.clipboard exists only in a secure context, and Vocalis is
+   *  routinely reached over plain HTTP on a LAN — where the API is not merely
+   *  refused, it is undefined. Falling back to execCommand covers that; if even
+   *  that is blocked, select the text and say so, because a button that does
+   *  nothing at all is worse than no button. */
   async function copy() {
     try {
-      await navigator.clipboard.writeText(command);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(command);
+        setState("copied");
+        setTimeout(() => setState("idle"), 2000);
+        return;
+      }
+      throw new Error("clipboard unavailable");
     } catch {
-      /* clipboard blocked (insecure origin) — the text is selectable anyway */
+      const scratch = document.createElement("textarea");
+      scratch.value = command;
+      // Off-screen but focusable: execCommand ignores a hidden element.
+      scratch.style.cssText = "position:fixed;top:-1000px;opacity:0";
+      document.body.appendChild(scratch);
+      scratch.select();
+      let ok = false;
+      try {
+        ok = document.execCommand("copy");
+      } catch {
+        ok = false;
+      }
+      document.body.removeChild(scratch);
+
+      if (ok) {
+        setState("copied");
+        setTimeout(() => setState("idle"), 2000);
+      } else {
+        selectCommand();
+        setState("select");
+        setTimeout(() => setState("idle"), 4000);
+      }
     }
+  }
+
+  function selectCommand() {
+    const node = box.current;
+    if (!node) return;
+    const range = document.createRange();
+    range.selectNodeContents(node);
+    const sel = window.getSelection();
+    sel?.removeAllRanges();
+    sel?.addRange(range);
   }
 
   return (
     <div className="install-command">
-      <pre className="cmd">{command}</pre>
+      {/* Clicking the command selects all of it — the reliable path when the
+          clipboard is off limits, and useful anyway for a long one-liner. */}
+      <pre className="cmd" ref={box} onClick={selectCommand} title="Click to select">
+        {command}
+      </pre>
       <button type="button" className="btn btn-ghost btn-small" onClick={copy}>
-        {copied ? "Copied" : "Copy"}
+        {state === "copied" ? "Copied" : state === "select" ? "Press ⌘C" : "Copy"}
       </button>
     </div>
   );
