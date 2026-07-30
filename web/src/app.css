@@ -1142,3 +1142,53 @@ code {
   margin-top: 0.5rem;
   flex: none;
 }
+
+/* ---- player ---- */
+
+.player-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.45);
+  display: grid;
+  place-items: center;
+  padding: 1.25rem;
+  z-index: 50;
+}
+
+.player {
+  width: min(460px, 100%);
+  display: grid;
+  gap: 1rem;
+}
+
+.player-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.player-scrub {
+  width: 100%;
+  accent-color: var(--brand);
+}
+
+.player-times {
+  display: flex;
+  justify-content: space-between;
+  font-size: 0.8rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  margin-top: -0.4rem;
+}
+
+.player-controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.8rem;
+}
+
+.player-play {
+  min-width: 6rem;
+}

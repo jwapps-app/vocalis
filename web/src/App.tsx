@@ -11,6 +11,7 @@ import {
   Narrator,
 } from "./api";
 import EditChapters from "./EditChapters";
+import Player from "./Player";
 import Login from "./Login";
 import Review from "./Review";
 import Setup from "./Setup";
@@ -75,11 +76,13 @@ function JobCard({
   onRebuilt,
   onReview,
   onEditChapters,
+  onListen,
 }: {
   job: Job;
   onRebuilt: () => void;
   onReview: (job: Job) => void;
   onEditChapters: (job: Job) => void;
+  onListen: (job: Job) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const active = ACTIVE.has(job.status);
@@ -200,7 +203,12 @@ function JobCard({
             </button>
           )}
           {done && (
-            <a className="btn btn-download" href={downloadUrl(job)}>
+            <button type="button" className="btn btn-download" onClick={() => onListen(job)}>
+              ▶ Listen
+            </button>
+          )}
+          {done && (
+            <a className="btn btn-ghost btn-small" href={downloadUrl(job)}>
               Download M4B
             </a>
           )}
@@ -246,6 +254,7 @@ export default function App() {
   const [narrators, setNarrators] = useState<Narrator[]>([]);
   const [draft, setDraft] = useState<Job | null>(null);
   const [editing, setEditing] = useState<Job | null>(null);
+  const [playing, setPlaying] = useState<Job | null>(null);
   const [analyzing, setAnalyzing] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -526,6 +535,8 @@ export default function App() {
         </section>
       )}
 
+      {playing && <Player job={playing} onClose={() => setPlaying(null)} />}
+
       {tab === "library" && (
         <section className="jobs-section">
           <h2>
@@ -543,6 +554,7 @@ export default function App() {
                   onRebuilt={refreshJobs}
                   onReview={setDraft}
                   onEditChapters={setEditing}
+                  onListen={setPlaying}
                 />
               ))}
             </ul>
