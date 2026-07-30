@@ -1192,3 +1192,96 @@ code {
 .player-play {
   min-width: 6rem;
 }
+
+/* ---- reader ---- */
+
+.reader-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  z-index: 60;
+}
+
+.reader {
+  width: min(680px, 100%);
+  height: min(88vh, 900px);
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  gap: 0.9rem;
+  padding: 1rem 1.1rem 1.2rem;
+}
+
+.reader-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+
+.reader-title {
+  flex: 1;
+  min-width: 0;
+  text-align: right;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-follow {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+  color: var(--muted);
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.reader-follow input { width: auto; }
+
+.reader-body {
+  overflow-y: auto;
+  padding-right: 0.4rem;
+  /* Reading measure, not app measure — long lines are tiring to follow. */
+  font-size: 1.02rem;
+  line-height: 1.75;
+}
+
+.reader-chapter-title {
+  margin: 1.6rem 0 0.7rem;
+  font-size: 1.1rem;
+  cursor: pointer;
+}
+
+.reader-chapter-title:first-child { margin-top: 0; }
+
+.reader-body .block {
+  margin: 0 0 0.9rem;
+}
+
+.reader-body blockquote.block {
+  margin-inline: 1.2rem;
+  padding-left: 0.9rem;
+  border-left: 3px solid var(--border);
+  color: var(--muted);
+}
+
+.chunk {
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background 0.15s;
+}
+
+.chunk:hover { background: var(--surface-sunken); }
+
+/* The sentence being spoken. A wash rather than a block of colour, so the
+   words stay the thing being read and not the highlight. */
+.chunk.speaking,
+.block.speaking {
+  background: color-mix(in srgb, var(--brand) 18%, transparent);
+  border-radius: 4px;
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--brand) 18%, transparent);
+}

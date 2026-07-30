@@ -13,8 +13,10 @@ from fastapi import (Body, FastAPI, File, Form, HTTPException, Request,
 from fastapi.responses import (FileResponse, JSONResponse, Response,
                                StreamingResponse)
 
+from bs4 import BeautifulSoup
+
 from vocalis_core.epub_parse import parse_epub
-from vocalis_core.text_clean import clean_text, find_citations
+from vocalis_core.text_clean import chunk_paragraphs, clean_text, find_citations
 
 from .db import pool
 from .narrators import list_narrators, resolve
@@ -460,6 +462,10 @@ def job_citations(job_id: uuid.UUID):
 # shipping a whole book to the review screen.
 EXCERPT_CHARS = 700
 
+# Must match the worker's config, or re-chunking here would not reproduce
+# what was narrated and every chapter would fail its alignment check.
+MAX_CHUNK_CHARS = int(os.environ.get("VOCALIS_MAX_CHUNK_CHARS", "300"))
+
 
 @app.get("/api/jobs/{job_id}/excerpts")
 def job_excerpts(job_id: uuid.UUID, drop_citations: bool = False):
@@ -584,6 +590,104 @@ def upload_output(job_id: uuid.UUID, file: UploadFile = File(...)):
         _save_upload(file, DATA_DIR / rel)
         conn.execute("UPDATE jobs SET output_path = %s WHERE id = %s", (rel, job_id))
     return {"output_path": rel}
+
+
+@app.get("/api/jobs/{job_id}/read")
+def job_read(job_id: uuid.UUID):
+    """The book as it was printed, joined to when each part is spoken.
+
+    Two halves that only mean something together: the blocks carry the markup
+    the parser used to discard, and the timings recorded during synthesis say
+    when each chunk of text is read aloud. Chunks never cross a paragraph
+    break, so every one belongs inside a single block and the join needs no
+    character offsets.
+
+    Alignment is verified per chapter rather than assumed. Re-chunking here has
+    to reproduce exactly what the narrator chunked; if the counts disagree —
+    a book narrated before a chunking change, say — that chapter is returned
+    with its text and no timings, so it reads correctly and simply does not
+    follow along. Highlighting the wrong sentence would be worse than
+    highlighting none.
+    """
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT epub_path, chapters, timings, drop_citations, status"
+            " FROM jobs WHERE id = %s", (job_id,)
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "job not found")
+    if not row["timings"]:
+        raise HTTPException(
+            409,
+            "This book was narrated before timings were recorded, so it cannot "
+            "follow along. Converting it again would add them.",
+        )
+
+    try:
+        book = parse_epub(DATA_DIR / row["epub_path"])
+    except Exception as exc:
+        raise HTTPException(400, f"could not read EPUB: {exc}")
+
+    plan = {c["index"]: c for c in (row["chapters"] or [])}
+    drop = bool(row["drop_citations"])
+
+    # Timed chunks, grouped by the chapter they belong to.
+    by_chapter: dict[int, list] = {}
+    for chunk in row["timings"].get("chunks", []):
+        by_chapter.setdefault(chunk["chapter"], []).append(chunk)
+    chapter_times = {c["index"]: c for c in row["timings"].get("chapters", [])}
+
+    # The narrator numbers chapters by position among those it narrated, not by
+    # position in the EPUB, so walk the included ones in the same order.
+    included = [i for i, _ in enumerate(book.chapters)
+                if plan.get(i, {}).get("include", True)]
+
+    chapters = []
+    for position, index in enumerate(included):
+        source = book.chapters[index]
+        entry = plan.get(index, {})
+        timed = by_chapter.get(position, [])
+        cursor = 0
+        blocks = []
+        for block in source.blocks:
+            groups = chunk_paragraphs(
+                clean_text(block["text"], drop_citations=drop), MAX_CHUNK_CHARS
+            )
+            wanted = sum(len(g) for g in groups)
+            take = timed[cursor:cursor + wanted]
+            cursor += wanted
+            # Whether the block carries markup that a sentence boundary could
+            # cut through. Where it does, the reader shows the book's own HTML
+            # and lights the whole paragraph; where it does not, it can split
+            # into sentences and lose nothing. Formatting is never sacrificed —
+            # only the precision of the highlight, and only for the minority of
+            # paragraphs that are both emphasised and multi-sentence.
+            inner = BeautifulSoup(block["html"], "lxml")
+            has_inline = bool(inner.find(["em", "i", "strong", "b", "a",
+                                          "span", "sup", "sub", "code", "small"]))
+            blocks.append({
+                "tag": block["tag"],
+                "html": block["html"],
+                "inline": has_inline,
+                "chunks": [
+                    {"text": c["text"], "start": c["start"], "end": c["end"]}
+                    for c in take
+                ] if len(take) == wanted else [],
+            })
+        aligned = cursor == len(timed)
+        chapters.append({
+            "index": position,
+            "title": entry.get("title") or source.title,
+            "start": chapter_times.get(position, {}).get("start", 0.0),
+            "end": chapter_times.get(position, {}).get("end", 0.0),
+            "blocks": blocks if aligned else [
+                {"tag": b["tag"], "html": b["html"], "chunks": []}
+                for b in source.blocks
+            ],
+            "aligned": aligned,
+        })
+
+    return {"chapters": chapters}
 
 
 @app.get("/api/jobs/{job_id}/cover")

@@ -46,6 +46,8 @@ export interface Job {
   work_seconds: number;
   /** Playing time of the finished audiobook. */
   audio_seconds: number | null;
+  /** Present once a book was narrated with timings — enables read-along. */
+  timings: unknown | null;
   error: string | null;
   created_at: string;
   started_at: string | null;
@@ -163,6 +165,25 @@ export const getExcerpts = (jobId: string, dropCitations: boolean) =>
  *  drop. Anything else has to be narrated. */
 export const getRecorded = (jobId: string) =>
   req<{ indexes: number[] }>(`/api/jobs/${jobId}/recorded`);
+
+/** A chapter as it was printed, joined to when each part is spoken. */
+export interface ReadChapter {
+  index: number;
+  title: string;
+  start: number;
+  end: number;
+  aligned: boolean;
+  blocks: {
+    tag: string;
+    html: string;
+    /** True when the block carries inline markup a sentence split would cut. */
+    inline: boolean;
+    chunks: { text: string; start: number; end: number }[];
+  }[];
+}
+
+export const getReadable = (jobId: string) =>
+  req<{ chapters: ReadChapter[] }>(`/api/jobs/${jobId}/read`);
 
 export const bundleUrl = "/api/worker/bundle";
 export const getWorker = () =>

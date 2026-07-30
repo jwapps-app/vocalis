@@ -422,7 +422,12 @@ def process_job(conn: psycopg.Connection, job) -> None:
             nonlocal done_chars
             position, part = key
             seg_seconds[key] = duration
-            seg_timings[key] = list(timings)
+            # Normalised to the same shape the cached file uses. The pool hands
+            # back tuples; a resumed job reads dicts from disk. build_timeline
+            # sees both, so they have to agree here rather than there.
+            seg_timings[key] = [
+                {"text": t, "start": a, "end": b} for t, a, b in timings
+            ]
             _save_segment_timings(work_dir, key, duration, timings)
             done_chars += sum(len(c) for c in segments[position][part][1] or ())
             # Only announce a chapter once every one of its segments has landed;

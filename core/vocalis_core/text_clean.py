@@ -223,6 +223,34 @@ def _fit(sentence: str, max_chars: int) -> list[str]:
     return pieces
 
 
+def chunk_paragraphs(text: str, max_chars: int) -> list[list[str]]:
+    """Chunk each paragraph separately, keeping the grouping.
+
+    Same work as chunk_text, but it says which paragraph every chunk came from.
+    A reader needs that: it renders the book's own paragraphs, and has to know
+    which chunks — and so which spoken moments — belong inside each one.
+    """
+    grouped: list[list[str]] = []
+    for paragraph in text.split("\n\n"):
+        paragraph = paragraph.replace("\n", " ").strip()
+        if not paragraph:
+            grouped.append([])
+            continue
+        chunks: list[str] = []
+        current = ""
+        for sentence in split_sentences(paragraph):
+            for piece in _fit(sentence, max_chars):
+                if current and len(current) + len(piece) + 1 > max_chars:
+                    chunks.append(current)
+                    current = piece
+                else:
+                    current = f"{current} {piece}".strip()
+        if current:
+            chunks.append(current)
+        grouped.append(chunks)
+    return grouped
+
+
 def chunk_text(text: str, max_chars: int) -> list[str]:
     """Pack whole sentences into chunks of at most max_chars.
 
@@ -237,20 +265,8 @@ def chunk_text(text: str, max_chars: int) -> list[str]:
     Respecting the boundary is also what the text means. Chunks are joined with
     a short pause, so a paragraph break now produces one, where before it was
     flattened to a single space mid-chunk.
+
+    Defined in terms of chunk_paragraphs so the two can never disagree — the
+    reader's alignment depends on them producing identical chunks.
     """
-    chunks: list[str] = []
-    for paragraph in text.split("\n\n"):
-        paragraph = paragraph.replace("\n", " ").strip()
-        if not paragraph:
-            continue
-        current = ""
-        for sentence in split_sentences(paragraph):
-            for piece in _fit(sentence, max_chars):
-                if current and len(current) + len(piece) + 1 > max_chars:
-                    chunks.append(current)
-                    current = piece
-                else:
-                    current = f"{current} {piece}".strip()
-        if current:
-            chunks.append(current)
-    return chunks
+    return [c for group in chunk_paragraphs(text, max_chars) for c in group]

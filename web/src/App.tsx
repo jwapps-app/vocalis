@@ -12,6 +12,7 @@ import {
 } from "./api";
 import EditChapters from "./EditChapters";
 import Player from "./Player";
+import Reader from "./Reader";
 import Login from "./Login";
 import Review from "./Review";
 import Setup from "./Setup";
@@ -77,12 +78,14 @@ function JobCard({
   onReview,
   onEditChapters,
   onListen,
+  onRead,
 }: {
   job: Job;
   onRebuilt: () => void;
   onReview: (job: Job) => void;
   onEditChapters: (job: Job) => void;
   onListen: (job: Job) => void;
+  onRead: (job: Job) => void;
 }) {
   const [confirming, setConfirming] = useState(false);
   const active = ACTIVE.has(job.status);
@@ -207,6 +210,16 @@ function JobCard({
               ▶ Listen
             </button>
           )}
+          {done && Boolean(job.timings) && (
+            <button
+              type="button"
+              className="btn btn-download"
+              onClick={() => onRead(job)}
+              title="Read along while it is narrated"
+            >
+              Read along
+            </button>
+          )}
           {done && (
             <a className="btn btn-ghost btn-small" href={downloadUrl(job)}>
               Download M4B
@@ -255,6 +268,7 @@ export default function App() {
   const [draft, setDraft] = useState<Job | null>(null);
   const [editing, setEditing] = useState<Job | null>(null);
   const [playing, setPlaying] = useState<Job | null>(null);
+  const [reading, setReading] = useState<Job | null>(null);
   const [analyzing, setAnalyzing] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
@@ -536,6 +550,7 @@ export default function App() {
       )}
 
       {playing && <Player job={playing} onClose={() => setPlaying(null)} />}
+      {reading && <Reader job={reading} onClose={() => setReading(null)} />}
 
       {tab === "library" && (
         <section className="jobs-section">
@@ -555,6 +570,7 @@ export default function App() {
                   onReview={setDraft}
                   onEditChapters={setEditing}
                   onListen={setPlaying}
+                  onRead={setReading}
                 />
               ))}
             </ul>

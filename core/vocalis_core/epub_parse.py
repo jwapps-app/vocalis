@@ -87,6 +87,41 @@ def _derive_title(text: str) -> str | None:
     return first.rstrip(".")
 
 
+# Inline markup worth keeping when the book is shown on screen. Everything else
+# is unwrapped — its text survives, its tag does not.
+SAFE_INLINE = {"em", "i", "strong", "b", "u", "span", "sup", "sub",
+               "code", "small", "br", "q", "cite", "abbr", "a"}
+# Only these attributes survive, and only on the tags that use them. Dropping
+# the rest takes event handlers (onclick, onerror) and inline styles with it.
+SAFE_ATTRS = {"a": {"href"}, "abbr": {"title"}}
+
+
+def _sanitize(element) -> str:
+    """The block's inner markup, reduced to what is safe to render.
+
+    A book is an untrusted document — anyone can hand Vocalis an EPUB — and
+    this HTML ends up inside the page. Whitelisting rather than blacklisting:
+    unknown tags are unwrapped so their text still reads, and every attribute
+    outside the short list goes, which is what removes onerror handlers and
+    javascript: URLs without having to enumerate them.
+    """
+    from copy import copy
+
+    clone = copy(element)
+    for tag in clone.find_all(True):
+        if tag.name not in SAFE_INLINE:
+            tag.unwrap()
+            continue
+        allowed = SAFE_ATTRS.get(tag.name, set())
+        for name in list(tag.attrs):
+            if name not in allowed:
+                del tag[name]
+        href = tag.get("href", "")
+        if tag.name == "a" and not href.startswith(("http://", "https://", "#")):
+            del tag["href"]
+    return clone.decode_contents()
+
+
 def _item_text(item) -> tuple[str | None, str, list[dict]]:
     """Title, the plain text to narrate, and the formatted blocks it came from.
 
@@ -124,10 +159,10 @@ def _item_text(item) -> tuple[str | None, str, list[dict]]:
             continue
         blocks.append({
             "tag": element.name,
-            # decode_contents keeps the inner markup and drops the wrapper, so
-            # the reader chooses its own element and cannot inherit a stylesheet
-            # class from the book that fights its own layout.
-            "html": element.decode_contents(),
+            # Sanitized inner markup: the wrapper is dropped so the reader
+            # picks its own element, and anything not on the whitelist is
+            # unwrapped rather than rendered.
+            "html": _sanitize(element),
             "text": content,
         })
 
