@@ -189,8 +189,12 @@ def _init_worker() -> None:
     _synth = Synthesizer()
 
 
-def _render(args) -> tuple[int, float]:
-    """Synthesize one chapter inside a pool process. Returns (index, seconds)."""
+def _render(args):
+    """Synthesize one segment in a pool process.
+
+    Returns (key, seconds, chunk_timings) — the timings are carried back with
+    the audio because only this process knows where each chunk landed.
+    """
     index, chunks, voice_ref, seed, out_path, params, trailing_pause = args
     import torch
 
@@ -201,7 +205,7 @@ def _render(args) -> tuple[int, float]:
             torch.mps.empty_cache()
 
     try:
-        duration = _synth.synth_chapter(
+        duration, timings = _synth.synth_chapter(
             chunks, Path(voice_ref) if voice_ref else None, seed, Path(out_path),
             params=params, trailing_pause=trailing_pause,
         )
@@ -217,12 +221,12 @@ def _render(args) -> tuple[int, float]:
         # the Mac is", which are opposite fixes.
         log.warning("Chapter %d ran out of GPU memory; retrying once — %s", index, exc)
         release()
-        duration = _synth.synth_chapter(
+        duration, timings = _synth.synth_chapter(
             chunks, Path(voice_ref) if voice_ref else None, seed, Path(out_path),
             params=params, trailing_pause=trailing_pause,
         )
     release()
-    return index, duration
+    return index, duration, timings
 
 
 def cached_seconds(path: Path) -> float | None:

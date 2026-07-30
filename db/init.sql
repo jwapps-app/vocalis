@@ -56,6 +56,15 @@ CREATE TABLE jobs (
   work_seconds REAL NOT NULL DEFAULT 0,
   -- Playing time of the finished audiobook.
   audio_seconds REAL,
+  -- Where every chapter and chunk of text falls in the finished recording:
+  --   {"chapters": [{"index": 0, "title": "...", "start": 0.0, "end": 237.0}],
+  --    "chunks":   [{"chapter": 0, "text": "...", "start": 0.0, "end": 4.2}]}
+  --
+  -- Recorded during synthesis because it cannot be recovered afterwards: the
+  -- offsets are known while the audio is being concatenated and nowhere else,
+  -- short of running speech recognition over the finished file. A book
+  -- narrated without this would have to be narrated again to gain it.
+  timings JSONB,
 
   error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),

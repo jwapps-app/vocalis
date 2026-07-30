@@ -82,6 +82,7 @@ MIGRATIONS = [
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS work_seconds REAL NOT NULL DEFAULT 0",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS audio_seconds REAL",
     "ALTER TABLE workers ADD COLUMN IF NOT EXISTS free_gpu_gb REAL",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS timings JSONB",
 ]
 
 
@@ -147,7 +148,7 @@ JOB_COLUMNS = """
     id, status, epub_filename, title, author, seed, narrator, mode, chapters,
     concurrency, cancel_requested,
     chapter_count, chapters_done, progress, estimated_total_seconds,
-    work_seconds, audio_seconds,
+    work_seconds, audio_seconds, timings,
     error, created_at, updated_at, started_at, finished_at,
     (output_path IS NOT NULL) AS has_output
 """

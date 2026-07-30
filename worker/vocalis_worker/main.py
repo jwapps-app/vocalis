@@ -10,6 +10,7 @@ it already has.
 """
 
 import hashlib
+import json
 import logging
 import signal
 import time
@@ -219,6 +220,67 @@ def fetch_voice(job, work_dir: Path) -> Path | None:
     return dest
 
 
+
+def _timings_path(work_dir: Path, key: tuple[int, int]) -> Path:
+    position, part = key
+    return work_dir / f"timings_{position:04d}_{part:03d}.json"
+
+
+def _save_segment_timings(work_dir: Path, key, duration: float, timings) -> None:
+    """Keep a segment's timings beside its audio.
+
+    Cached for the same reason the audio is: a book finished across two runs
+    would otherwise end up with timings only for the segments the final run
+    happened to render, and there is no way to recompute the rest short of
+    narrating them again.
+    """
+    payload = {"duration": duration,
+               "chunks": [{"text": t, "start": s, "end": e} for t, s, e in timings]}
+    _timings_path(work_dir, key).write_text(json.dumps(payload))
+
+
+def _load_segment_timings(work_dir: Path, key) -> list | None:
+    path = _timings_path(work_dir, key)
+    if not path.is_file():
+        return None
+    try:
+        return json.loads(path.read_text())["chunks"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def build_timeline(chapters, segments, seg_seconds, seg_timings, work_dir) -> dict:
+    """Turn per-segment timings into offsets within the finished audiobook.
+
+    Segments are concatenated in order, so a chunk's place in the book is its
+    place in its segment plus everything before it. Chapters get their own
+    entries so a player can offer a chapter list — the marks written into the
+    M4B are unreadable to a browser's <audio>.
+    """
+    book_chunks, book_chapters = [], []
+    offset = 0.0
+    for position, units in enumerate(segments):
+        chapter_start = offset
+        for part, _ in enumerate(units):
+            key = (position, part)
+            chunks = seg_timings.get(key) or _load_segment_timings(work_dir, key) or []
+            for c in chunks:
+                book_chunks.append({
+                    "chapter": position,
+                    "text": c["text"],
+                    "start": round(offset + c["start"], 3),
+                    "end": round(offset + c["end"], 3),
+                })
+            offset += seg_seconds.get(key, 0.0)
+        book_chapters.append({
+            "index": position,
+            "title": chapters[position].title,
+            "start": round(chapter_start, 3),
+            "end": round(offset, 3),
+        })
+    return {"chapters": book_chapters, "chunks": book_chunks}
+
+
 def process_job(conn: psycopg.Connection, job) -> None:
     job_id = job["id"]
     is_sample = job["mode"] == "sample"
@@ -285,6 +347,11 @@ def process_job(conn: psycopg.Connection, job) -> None:
 
     # Reuse anything already rendered; only the rest costs GPU time.
     seg_seconds: dict[tuple[int, int], float] = {}
+    # Where each chunk of text lands inside its segment. Cached beside the
+    # audio so a resumed job keeps the timings of segments it is not re-doing —
+    # otherwise a book finished across two runs would have timings only for
+    # whatever the last run happened to render.
+    seg_timings: dict[tuple[int, int], list] = {}
     todo = []
     for position, units in enumerate(segments):
         for part, (path, chunks) in enumerate(units):
@@ -351,10 +418,12 @@ def process_job(conn: psycopg.Connection, job) -> None:
                 ).fetchone()["cancel_requested"]
             )
 
-        def on_done(key: tuple[int, int], duration: float) -> None:
+        def on_done(key: tuple[int, int], duration: float, timings=()) -> None:
             nonlocal done_chars
             position, part = key
             seg_seconds[key] = duration
+            seg_timings[key] = list(timings)
+            _save_segment_timings(work_dir, key, duration, timings)
             done_chars += sum(len(c) for c in segments[position][part][1] or ())
             # Only announce a chapter once every one of its segments has landed;
             # a half-rendered chapter is not progress the reader can use.
@@ -415,6 +484,9 @@ def process_job(conn: psycopg.Connection, job) -> None:
         # The M4B is a straight concatenation, so the chapter durations sum to
         # its playing time exactly.
         audio_seconds=sum(seg_seconds.values()),
+        timings=json.dumps(
+            build_timeline(chapters, segments, seg_seconds, seg_timings, work_dir)
+        ),
         work_seconds=work_base + (time.monotonic() - run_started),
     )
     conn.execute("UPDATE jobs SET finished_at = now() WHERE id = %s", (job_id,))

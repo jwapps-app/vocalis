@@ -58,13 +58,22 @@ class Synthesizer:
         params: dict | None = None,
         pause_seconds: float = 0.4,
         trailing_pause: bool = False,
-    ) -> float:
+    ) -> tuple[float, list[tuple[str, float, float]]]:
         """Synthesize chunks, join with short pauses, write a WAV.
 
-        Returns the chapter duration in seconds.
+        Returns the duration and where each chunk of text falls within it, as
+        (text, start, end) in seconds from the start of this file.
+
+        The timings are a by-product of the concatenation — the offsets are
+        already known here — but they cannot be recovered afterwards from the
+        audio without speech recognition. Capturing them at synthesis is what
+        makes it possible to show which sentence is being read; a book narrated
+        without them would have to be narrated again.
         """
         pause = torch.zeros(int(self.sample_rate * pause_seconds))
         parts: list[torch.Tensor] = []
+        timings: list[tuple[str, float, float]] = []
+        samples = 0
         for i, chunk in enumerate(chunks):
             # Keep each chunk's output on the CPU (synth_chunk already moves it)
             # and release the GPU's cached blocks before the next one. Without
@@ -73,9 +82,16 @@ class Synthesizer:
             # per-process watermark — a late-chapter OOM even though live memory
             # is small. Freeing per chunk holds peak roughly constant regardless
             # of chapter length.
-            parts.append(self.synth_chunk(chunk, voice_ref, seed, params))
+            spoken = self.synth_chunk(chunk, voice_ref, seed, params)
+            start = samples / self.sample_rate
+            samples += spoken.shape[0]
+            timings.append((chunk, start, samples / self.sample_rate))
+            parts.append(spoken)
             if i < len(chunks) - 1:
                 parts.append(pause)
+                # The gap belongs to neither chunk, but it does move the next
+                # one later, so it has to be counted.
+                samples += pause.shape[0]
             if self.device == "mps":
                 torch.mps.empty_cache()
         # A chapter rendered as several segments would otherwise lose the pause
@@ -94,4 +110,4 @@ class Synthesizer:
             str(out_path), audio.unsqueeze(0), self.sample_rate,
             encoding="PCM_S", bits_per_sample=16,
         )
-        return audio.shape[0] / self.sample_rate
+        return audio.shape[0] / self.sample_rate, timings
