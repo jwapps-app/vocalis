@@ -37,6 +37,10 @@ class Chapter:
     source: str = "toc"
     # True when this looks like front/back matter rather than content.
     front_matter: bool = False
+    # The same content with its markup kept, one entry per paragraph, heading,
+    # list item or quotation. `text` is these joined by blank lines, so the two
+    # stay in step and a chunk always falls inside a single block.
+    blocks: list[dict] = field(default_factory=list)
 
     @property
     def chars(self) -> int:
@@ -83,7 +87,19 @@ def _derive_title(text: str) -> str | None:
     return first.rstrip(".")
 
 
-def _item_text(item) -> tuple[str | None, str]:
+def _item_text(item) -> tuple[str | None, str, list[dict]]:
+    """Title, the plain text to narrate, and the formatted blocks it came from.
+
+    The plain text is unchanged — it is what the narrator reads, and altering
+    it would invalidate every cached recording. The blocks are the same content
+    with its markup intact, in the same order, so a reader can show italics,
+    headings and verse rather than a flattened transcript.
+
+    They line up exactly: the text is these blocks joined by blank lines, and
+    chunking never crosses a blank line, so every chunk belongs to precisely
+    one block. That is what lets a highlight follow the narration without any
+    character-offset bookkeeping.
+    """
     soup = BeautifulSoup(item.get_content(), "lxml")
     # Footnote markers and page-number anchors add noise when read aloud.
     for tag in soup.find_all(["sup", "script", "style"]):
@@ -94,11 +110,32 @@ def _item_text(item) -> tuple[str | None, str]:
     title = _heading(soup)
 
     body = soup.body or soup
-    blocks = body.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li"])
-    text = "\n\n".join(t for t in (_block_text(b) for b in blocks) if t)
+    found = body.find_all(["p", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li"])
+
+    # A <blockquote> wrapping a <p> matches twice, and both carry the same
+    # words — so quoted passages were being narrated twice over. Keep only the
+    # outermost of any nested pair; its text already contains the inner one's.
+    outermost = [e for e in found if not any(a in found for a in e.parents)]
+
+    blocks: list[dict] = []
+    for element in outermost:
+        content = _block_text(element)
+        if not content:
+            continue
+        blocks.append({
+            "tag": element.name,
+            # decode_contents keeps the inner markup and drops the wrapper, so
+            # the reader chooses its own element and cannot inherit a stylesheet
+            # class from the book that fights its own layout.
+            "html": element.decode_contents(),
+            "text": content,
+        })
+
+    text = "\n\n".join(b["text"] for b in blocks)
     if not text:
         text = _block_text(body)
-    return title, text
+        blocks = [{"tag": "p", "html": text, "text": text}] if text else []
+    return title, text, blocks
 
 
 def _toc_titles(eb: epub.EpubBook) -> dict[str, str]:
@@ -209,7 +246,7 @@ def parse_epub(path: Path) -> Book:
         item = eb.get_item_with_id(spine_id)
         if item is None or item.get_name() not in docs:
             continue
-        heading, text = _item_text(item)
+        heading, text, blocks = _item_text(item)
         if len(text) < MIN_CHAPTER_CHARS:
             continue
         name = item.get_name()
@@ -229,6 +266,7 @@ def parse_epub(path: Path) -> Book:
                 text=text,
                 source=source,
                 front_matter=bool(FRONT_MATTER.match(title)),
+                blocks=blocks,
             )
         )
 
