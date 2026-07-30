@@ -46,8 +46,10 @@ export interface Job {
   work_seconds: number;
   /** Playing time of the finished audiobook. */
   audio_seconds: number | null;
-  /** Present once a book was narrated with timings — enables read-along. */
-  timings: unknown | null;
+  /** True once a book was narrated with timings — enables read-along and
+   *  chapter skip. A flag rather than the data: the timings run to thousands of
+   *  chunks and this list is polled. */
+  has_timings: boolean;
   error: string | null;
   created_at: string;
   started_at: string | null;
@@ -184,6 +186,17 @@ export interface ReadChapter {
 
 export const getReadable = (jobId: string) =>
   req<{ chapters: ReadChapter[] }>(`/api/jobs/${jobId}/read`);
+
+/** Where a chapter starts and ends in the finished recording. */
+export interface ChapterMark {
+  index: number;
+  title: string;
+  start: number;
+  end: number;
+}
+
+export const getChapterMarks = (jobId: string) =>
+  req<{ chapters: ChapterMark[] }>(`/api/jobs/${jobId}/chapters`);
 
 export const bundleUrl = "/api/worker/bundle";
 export const getWorker = () =>

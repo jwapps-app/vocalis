@@ -150,7 +150,11 @@ JOB_COLUMNS = """
     id, status, epub_filename, title, author, seed, narrator, mode, chapters,
     concurrency, cancel_requested,
     chapter_count, chapters_done, progress, estimated_total_seconds,
-    work_seconds, audio_seconds, timings,
+    work_seconds, audio_seconds,
+    -- The blob itself is thousands of chunks — hundreds of kilobytes for a long
+    -- book — and the list is polled every couple of seconds. All the list needs
+    -- is whether it exists; the chapter marks have their own endpoint.
+    (timings IS NOT NULL) AS has_timings,
     error, created_at, updated_at, started_at, finished_at,
     (output_path IS NOT NULL) AS has_output
 """
@@ -590,6 +594,25 @@ def upload_output(job_id: uuid.UUID, file: UploadFile = File(...)):
         _save_upload(file, DATA_DIR / rel)
         conn.execute("UPDATE jobs SET output_path = %s WHERE id = %s", (rel, job_id))
     return {"output_path": rel}
+
+
+@app.get("/api/jobs/{job_id}/chapters")
+def job_chapters(job_id: uuid.UUID):
+    """Where each chapter begins in the finished recording.
+
+    Its own endpoint, and its own slice of the JSONB, because this is the small
+    half of the timing data — a few dozen marks against thousands of chunks —
+    and the player wants only this. Asking Postgres for `timings -> 'chapters'`
+    keeps the rest of the blob out of the response entirely.
+    """
+    with pool.connection() as conn:
+        row = conn.execute(
+            "SELECT timings -> 'chapters' AS marks FROM jobs WHERE id = %s",
+            (job_id,),
+        ).fetchone()
+    if row is None:
+        raise HTTPException(404, "job not found")
+    return {"chapters": row["marks"] or []}
 
 
 @app.get("/api/jobs/{job_id}/read")

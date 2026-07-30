@@ -210,7 +210,7 @@ function JobCard({
               ▶ Listen
             </button>
           )}
-          {done && Boolean(job.timings) && (
+          {done && job.has_timings && (
             <button
               type="button"
               className="btn btn-download"

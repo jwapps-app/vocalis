@@ -1193,6 +1193,65 @@ code {
   min-width: 6rem;
 }
 
+.player-now {
+  margin: -0.4rem 0 -0.5rem;
+  text-align: center;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+/* Capped rather than open-ended: a book of forty chapters would otherwise push
+   the play controls off a phone screen. */
+.player-chapters {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 14rem;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.player-chapter {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.75rem;
+  width: 100%;
+  padding: 0.5rem 0.7rem;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  font-size: 0.9rem;
+  text-align: left;
+  cursor: pointer;
+}
+
+.player-chapter:hover {
+  background: var(--surface-sunken);
+}
+
+.player-chapter.current {
+  background: var(--bg-accent);
+  font-weight: 600;
+  color: var(--brand);
+}
+
+.player-chapter-title {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.player-chapter-time {
+  flex: none;
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
 /* ---- reader ---- */
 
 .reader-overlay {
