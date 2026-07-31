@@ -20,7 +20,7 @@ services:
       # database is not on the network at all; set DB_BIND to this machine's
       # LAN address when the worker runs elsewhere — at which point the
       # password is the only thing protecting it, so make it a real one.
-      - "${DB_BIND:-127.0.0.1}:5445:5432"
+      - "${DB_BIND:-127.0.0.1}:${DB_PORT:-5445}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
