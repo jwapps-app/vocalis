@@ -1158,7 +1158,14 @@ code {
 .player {
   width: min(460px, 100%);
   display: grid;
+  /* See .reader — a nowrap chapter title would otherwise widen the column
+     past the card instead of being clipped to it. */
+  grid-template-columns: minmax(0, 1fr);
   gap: 1rem;
+}
+
+.player > * {
+  min-width: 0;
 }
 
 .player-head {
@@ -1268,9 +1275,18 @@ code {
   width: min(680px, 100%);
   height: min(88vh, 900px);
   display: grid;
+  /* Both axes have to be told they may shrink. A grid item's default
+     min-width is auto — it refuses to go below its own min-content — so the
+     nowrap book title in the bar sized the column to the whole title and every
+     row overflowed the card, text running out over the page behind it. */
+  grid-template-columns: minmax(0, 1fr);
   grid-template-rows: auto minmax(0, 1fr);
   gap: 0.9rem;
   padding: 1rem 1.1rem 1.2rem;
+}
+
+.reader > * {
+  min-width: 0;
 }
 
 .reader-bar {
