@@ -1,21 +1,50 @@
 # Vocalis
 
-EPUB → M4B audiobook converter. See [vocalis.md](vocalis.md) for the full spec.
+Turn an EPUB into a chaptered M4B audiobook, narrated on your own machine.
+Nothing is sent to a cloud service.
 
-Split deployment: web UI + API + Postgres run in Docker; the TTS worker runs
-**natively** on the host so Chatterbox gets the Metal (MPS) backend.
-The two halves share a Postgres job queue (`FOR UPDATE SKIP LOCKED`) and a
-bind-mounted data directory. Paths in the DB are relative to that directory.
+**In practice this needs a Mac.** The narration runs on Apple Silicon's GPU
+through Metal, which is what makes a full-length book take hours rather than
+days. The server half runs anywhere Docker does — a NAS is a good home for it —
+but the narrator wants a Mac.
 
-## 1. Containerized half
+There is a CUDA path in the worker and a systemd unit in the installer, and the
+memory budgeting reads real figures from `torch.cuda.mem_get_info()`. It is
+**untested** — nobody has run it end to end — so treat Linux and NVIDIA as a
+starting point rather than a supported configuration. Reports welcome. CPU-only
+works and is far too slow to finish a book.
+
+Split deployment, because Metal does not pass through to Docker on macOS:
+
+- **Server** — web UI, API and Postgres, in Docker.
+- **Narrator** — a native process on the Mac, installed with one command.
+
+They talk over HTTP and a Postgres job queue. The narrator has no access to the
+server's filesystem: it fetches the book, keeps its own scratch on local disk,
+and posts the finished audiobook back. So the two halves can be different
+machines with nothing shared between them.
+
+## 1. The server
 
 ```sh
-cp .env.example .env   # set POSTGRES_PASSWORD and an absolute VOCALIS_DATA_DIR
-docker compose up -d --build
+cp .env.example .env      # set POSTGRES_PASSWORD
+docker compose up -d
 ```
 
-Web UI: <http://localhost:8091>. Postgres is exposed on `127.0.0.1:5445` for
-the native worker.
+That pulls prebuilt images — this file plus `.env` is the whole install, so it
+can be pasted straight into Portainer. To build from this checkout instead:
+
+```sh
+docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
+```
+
+Open <http://localhost:8091>. **The first page asks you to choose a password**;
+Vocalis is locked to a single one from then on. Set it before putting the
+server anywhere other people can reach.
+
+If the narrator will run on a *different* machine from the server, also set
+`DB_BIND` and `WORKER_DB_HOSTPORT` — see `.env.example`. Otherwise Postgres
+stays on loopback and is not on the network at all.
 
 Nothing else needs copying in. The ten narrator voices are baked into the API
 image and seeded into the data directory the first time the stack starts —
@@ -24,28 +53,35 @@ survive restarts. They were synthesized once with Kokoro-82M (Apache-2.0) and
 are shipped rather than generated because regenerating them would mean
 installing Kokoro, espeak-ng and a spaCy model for a one-time job.
 
-## 2. Native worker (the machine with the GPU)
+## 2. The narrator (the Mac)
 
-Open **Setup** in the web UI, download the worker bundle, unzip it, and
-double-click **Install Vocalis Narrator** — or run `./install.sh`. The only
-question it asks is the database password.
+Open **Setup** in the web UI and run the command it shows you. It is one line,
+already carrying your server's address and an enrolment key:
+
+```sh
+curl -fsSL "http://<your-server>:8091/api/worker/install?key=..." | sh
+```
+
+The only question it asks is the database password — `POSTGRES_PASSWORD` from
+the server's `.env`. It checks that before downloading PyTorch, so a wrong
+paste costs a second rather than several minutes.
 
 Everything else it works out. It finds a Python version PyTorch actually
 supports (the system `python3` is routinely too new — 3.13 on a current Mac,
 where the install dies partway through with a compiler error and no mention of
 versions), fetching one only if the machine has none. It installs `ffmpeg` if
-Homebrew is present. And it locates the shared data directory rather than
-asking: the server's own path when the worker runs on that machine, otherwise
-by looking for the narrator voices under the mounted shares. Asking would only
-invite a plausible wrong answer that surfaces much later as a job unable to
-find its book.
+Homebrew is present. It installs itself to
+`~/Library/Application Support/Vocalis/narrator` and registers a launch agent,
+so the narrator starts with the machine.
 
-When the data directory is a network share it also registers a login agent to
-remount it, because macOS does not bring an SMB mount back after a restart —
-and the worker itself waits for the share rather than starting without it. That
-matters more than it sounds: every `mkdir(parents=True)` in the pipeline would
-otherwise recreate the tree *underneath* an empty mount point and quietly fill
-the startup disk with audio nobody can find.
+It needs no access to the server's files. Books come down over HTTP and the
+finished audiobook goes back the same way.
+
+**Keep it up to date.** The narrator is installed separately and does not
+update itself, so a newer server can be running against an older narrator. It
+reports what it supports, and the library says so plainly when it is behind —
+re-run the same install command to bring it forward. It keeps the existing
+virtualenv, so this does not re-download PyTorch.
 
 The Setup page also shows whether a narrator is **connected** and on what
 hardware, read from a `workers` heartbeat row the worker upserts every poll —
@@ -64,9 +100,14 @@ brew install ffmpeg   # if not already present
 
 DATABASE_URL="postgresql://vocalis@127.0.0.1:5445/vocalis" \
 PGPASSWORD="<your POSTGRES_PASSWORD>" \
-VOCALIS_DATA_DIR="$PWD/../data" \
+VOCALIS_API_URL="http://127.0.0.1:8091" \
+VOCALIS_WORKER_TOKEN="<from the Setup page's install command>" \
 .venv/bin/python -m vocalis_worker.main
 ```
+
+Scratch space goes to `~/Library/Application Support/Vocalis` unless
+`VOCALIS_WORK_DIR` says otherwise. It is purely local — nothing there is shared
+with the server.
 
 First run downloads the Chatterbox weights from Hugging Face.
 
@@ -103,6 +144,34 @@ cd worker
 Synthesizes (part of) a median-length chapter and projects total conversion
 time against the 24h target. The worker also updates this estimate live in
 `estimated_total_seconds` after each chapter, surfaced as an ETA in the UI.
+
+## Security, honestly
+
+Vocalis is built for a home network. Know what it does and does not do before
+putting it anywhere else.
+
+- **One password, one user.** Set on first load, stored as a salted hash. There
+  are no accounts and no roles. Everything except the login and the narrator's
+  own enrolment is closed by default.
+- **The session is a cookie** (`HttpOnly`, `SameSite=Lax`), not a bearer token,
+  because `<audio>`, `<img>` and download links cannot send an `Authorization`
+  header and the player and reader depend on them.
+- **No TLS of its own.** It serves plain HTTP. On a LAN that means the password
+  crosses the network in the clear, and browsers will not install the PWA or
+  register a service worker outside a secure context. Put it behind something
+  that terminates TLS — Tailscale, Caddy, a Cloudflare Tunnel — before exposing
+  it beyond your own network. The Setup page explains this where it bites.
+- **The database port** is on loopback unless you set `DB_BIND`. Once you do,
+  `POSTGRES_PASSWORD` is the only thing protecting it, so generate a real one.
+- **The enrolment key** in the install command is the worker token. Anyone who
+  has it can register a narrator and pull books; treat the command as a secret
+  and do not paste it into an issue.
+- **EPUB markup is sanitized** before the reader renders it — tags reduced to a
+  known-safe set, every attribute but `href`/`title` dropped, and non-http(s)
+  URLs stripped — because an EPUB is an untrusted document that arrives as HTML.
+
+Found something? Open an issue, or email the address on the commit history if
+it is sensitive.
 
 ## Narrators
 
@@ -210,7 +279,7 @@ current tick-boxes, so deselecting a chapter updates the figure immediately.
 That is the point of the refactor rather than incidental tidiness: a preview
 computed from a second, near-identical rule could disagree with what actually
 happens, which would be worse than showing nothing. The invariant is checked
-directly — on the July issue the preview reports 240 and stripping removes 240.
+directly: on the book above the preview reports 240 and stripping removes 240.
 
 ### Speed: parallel chapters
 
@@ -249,8 +318,8 @@ them. That takes under a second and yields real headroom. `safe_concurrency()`
 divides it by the measured per-process peak, holding back
 `GPU_SAFETY_MARGIN_GB` so the desktop can grow mid-book.
 
-The difference is not academic: with a browser and editor open this Mac
-measured ~6 GB free and ran one chapter at a time; with them closed it measured
+The difference is not academic: with a browser and editor open, one 24 GB Mac
+measured ~6 GB free and ran a chapter at a time; with them closed it measured
 16.0 GB and ran two. The Setup page shows the number and says so, because
 quitting a browser before a long book is a real and otherwise invisible lever.
 Per job rather than at startup, since a reading taken at login says nothing
@@ -304,8 +373,9 @@ over. Cancelled jobs keep the `cancelled` status and can also just be deleted.
 
 ### Cached chapter audio
 
-Chapter WAVs are kept in `data/work/<job-id>/` and reused on any later run of
-that job, keyed by the chapter's original index. So:
+Chapter audio is kept on the **narrator's** own disk, under
+`~/Library/Application Support/Vocalis/work/<job-id>/`, and reused on any
+later run of that job. So:
 
 - A job that fails partway **resumes** instead of re-narrating from scratch.
 - `POST /api/jobs/{id}/reassemble` ("Rebuild file" in the UI) rewrites the M4B
@@ -318,9 +388,6 @@ cleared out once you have filed the M4B away:
 - **Edit chapters** reopens a finished book's plan: rename sections, or untick
   one that shouldn't be there (a contents page narrated by mistake), then
   rebuild — `POST /api/jobs/{id}/reassemble` with the revised plan. The
-  endpoint has always accepted one; until recently nothing in the UI sent it,
-  so the button (then "Rebuild file") silently re-packaged with the old titles.
-
   Two costs hide behind the same tick-box, so the screen separates them.
   *Removing* a section is a repackage: the audio stays on disk, ffmpeg restamps
   the chapter marks, seconds. *Adding* a section that was skipped the first
@@ -346,13 +413,40 @@ narrate, and the size of the M4B.
 
 **"Converted in" is `work_seconds`, not `finished_at - started_at`.** The worker
 resets `started_at` every time it claims a job, so the naive subtraction
-describes only the run that happened to finish — the July issue, interrupted six
-times, reported "converted in 60s" for what was really hours, because the last
-run was just the assembly step. `work_seconds` is added to as chapters land, so
+describes only the run that happened to finish. One book interrupted six times
+reported "converted in 60s" for what was really hours, because the last run was
+just the assembly step. `work_seconds` is added to as chapters land, so
 it survives crashes and resumes and a crash costs at most one chapter's worth of
 tally. Books converted before the column existed show no figure at all rather
 than a recovered guess; their playing time was backfilled from the M4B with
 `ffprobe`, which is exact.
+
+## Listening and reading along
+
+A finished book can be played without leaving Vocalis, and read while it is
+narrated.
+
+- **Listen** opens a player: play, scrub, ±30s, and a chapter list you can jump
+  around with. Chapter marks written into the M4B are invisible to a browser's
+  `<audio>`, so these come from the timings recorded during narration
+  (`GET /api/jobs/{id}/chapters`).
+- **Read along** shows the book's own text — italics, headings, block quotes,
+  not a flattened transcript — with the sentence being spoken lit up, and a
+  chapter picker to move around. Clicking any sentence jumps the recording
+  there.
+
+Alignment is *verified*, not assumed. `GET /api/jobs/{id}/read` re-chunks each
+chapter and compares against what was narrated; a chapter whose counts disagree
+is shown as text with no highlighting rather than highlighting the wrong
+sentence. Books narrated before timings were recorded show no **Read along**
+button at all.
+
+If you have such a book, its timings can usually be recovered without narrating
+it again: chunks are joined with a pause of literal digital silence, so the
+boundaries are still in the cached audio. Rebuild the book (**Edit chapters →
+Rebuild**) and the narrator reads them back out of the audio it already has,
+accepting a segment only when the pauses divide it into exactly as many pieces
+as it had chunks.
 
 ## Installing as an app (PWA)
 
@@ -397,7 +491,9 @@ Cloudflare Tunnel are the usual options.
 
 ## Layout
 
-- `docker-compose.yml`, `db/init.sql` — Compose stack and job-table schema
+- `docker-compose.yml` — the deployment stack (pulls published images);
+  `docker-compose.build.yml` — override to build from this checkout
+- `db/init.sql` — job-table schema, baked into the db image
 - `core/` — **shared** EPUB parsing and text preparation. Installed into the
   API image and editable-installed into the worker venv (`uv pip install -e
   ../core`) so both halves agree on chapters, titles, and cover art.
