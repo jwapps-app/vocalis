@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { downloadUrl, getReadable, Job, ReadChapter } from "./api";
+import { seekWhenReady } from "./media";
 
 /**
  * Read the book while it is narrated, with the sentence being spoken lit up.
@@ -92,9 +93,52 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
   function jumpTo(seconds: number) {
     const el = audio.current;
     if (!el) return;
-    el.currentTime = seconds;
+    seekWhenReady(el, seconds);
     setAt(seconds);
     if (el.paused) { el.play(); setPlaying(true); }
+  }
+
+  /* The chapter being read. Chapters are in order, so the last one that has
+     already started is the one we are in. */
+  const chapterIndex = useMemo(() => {
+    if (!chapters?.length) return -1;
+    for (let i = chapters.length - 1; i >= 0; i--) {
+      if (at >= chapters[i].start) return i;
+    }
+    return 0;
+  }, [chapters, at]);
+
+  /* Move the page as well as the audio.
+   *
+   * The whole book is one scroll, so jumping the recording without jumping the
+   * text would leave the reader looking at wherever they had scrolled to. The
+   * scroll is unconditional rather than left to the follow effect, which only
+   * runs when Follow is ticked — turning it off should stop the page drifting
+   * on its own, not stop it obeying a chapter you chose. */
+  function goToChapter(index: number) {
+    const chapter = chapters?.[index];
+    const el = audio.current;
+    if (!chapter || !el) return;
+    // Unlike clicking a sentence, this does not start playing. Moving about
+    // the book is as often reading as it is listening, and a paused reader who
+    // picks a chapter has not asked for sound.
+    seekWhenReady(el, chapter.start);
+    setAt(chapter.start);
+    body.current
+      ?.querySelector<HTMLElement>(`[data-chapter="${index}"]`)
+      ?.scrollIntoView({ block: "start", behavior: "smooth" });
+  }
+
+  // Back within a few seconds of the start means the previous chapter; further
+  // in, it restarts this one. As on the player, and on everything else.
+  function stepChapter(delta: number) {
+    if (chapterIndex < 0 || !chapters) return;
+    const atStart = at - chapters[chapterIndex].start < 3;
+    goToChapter(
+      delta < 0 && !atStart
+        ? chapterIndex
+        : Math.min(chapters.length - 1, Math.max(0, chapterIndex + delta))
+    );
   }
 
   if (error) {
@@ -130,10 +174,46 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
           <button className="btn btn-ghost btn-small" onClick={onClose}>Close</button>
         </div>
 
+        {chapters && chapters.length > 1 && (
+          <div className="reader-nav">
+            <button
+              type="button"
+              className="btn btn-ghost btn-small"
+              onClick={() => stepChapter(-1)}
+              title="Previous chapter"
+            >
+              ⏮
+            </button>
+            {/* A select rather than a list: the list would be another long
+                scroll inside a page that is already one, and this one folds
+                away on a phone by itself. */}
+            <select
+              className="reader-chapter-pick"
+              value={chapterIndex < 0 ? 0 : chapterIndex}
+              onChange={(e) => goToChapter(Number(e.target.value))}
+              aria-label="Chapter"
+            >
+              {chapters.map((ch, i) => (
+                <option key={i} value={i}>
+                  {ch.title}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="btn btn-ghost btn-small"
+              onClick={() => stepChapter(1)}
+              title="Next chapter"
+            >
+              ⏭
+            </button>
+          </div>
+        )}
+
         <div className="reader-body" ref={body}>
           {!chapters && <p className="hint">Opening the book…</p>}
           {chapters?.map((ch, ci) => (
-            <section key={ci} className="reader-chapter">
+            <section key={ci} className="reader-chapter" data-chapter={ci}>
               <h3 className="reader-chapter-title" onClick={() => jumpTo(ch.start)}>
                 {ch.title}
               </h3>

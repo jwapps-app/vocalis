@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChapterMark, downloadUrl, getChapterMarks, Job } from "./api";
+import { seekWhenReady } from "./media";
 
 /**
  * Listen to a finished book without leaving Vocalis.
@@ -66,18 +67,18 @@ export default function Player({ job, onClose }: { job: Job; onClose: () => void
 
   function skip(delta: number) {
     const el = audio.current;
-    if (el) el.currentTime = Math.max(0, Math.min(total, el.currentTime + delta));
+    if (el) seekWhenReady(el, Math.max(0, Math.min(total, el.currentTime + delta)));
   }
 
   function seek(e: React.ChangeEvent<HTMLInputElement>) {
     const el = audio.current;
-    if (el) { el.currentTime = Number(e.target.value); setAt(Number(e.target.value)); }
+    if (el) { seekWhenReady(el, Number(e.target.value)); setAt(Number(e.target.value)); }
   }
 
   function jumpTo(seconds: number) {
     const el = audio.current;
     if (!el) return;
-    el.currentTime = seconds;
+    seekWhenReady(el, seconds);
     setAt(seconds);
   }
 

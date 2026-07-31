@@ -1280,7 +1280,8 @@ code {
      nowrap book title in the bar sized the column to the whole title and every
      row overflowed the card, text running out over the page behind it. */
   grid-template-columns: minmax(0, 1fr);
-  grid-template-rows: auto minmax(0, 1fr);
+  /* bar, chapter nav, then the text taking whatever is left. */
+  grid-template-rows: auto auto minmax(0, 1fr);
   gap: 0.9rem;
   padding: 1rem 1.1rem 1.2rem;
 }
@@ -1316,6 +1317,25 @@ code {
 }
 
 .reader-follow input { width: auto; }
+
+.reader-nav {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+/* Carries chapter titles of any length, so it must be allowed to be narrower
+   than its widest option — see the card's own column sizing. */
+.reader-chapter-pick {
+  flex: 1;
+  min-width: 0;
+  font-size: 0.85rem;
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface-sunken);
+  color: var(--text);
+}
 
 .reader-body {
   overflow-y: auto;
