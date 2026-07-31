@@ -100,15 +100,17 @@ def heartbeat(conn: psycopg.Connection) -> None:
         """
         INSERT INTO workers
             (id, hostname, device, device_name, free_gpu_gb, max_concurrency,
-             version, last_seen)
+             version, revision, last_seen)
         VALUES (%(id)s, %(hostname)s, %(device)s, %(device_name)s,
-                %(free_gpu_gb)s, %(max_concurrency)s, %(version)s, now())
+                %(free_gpu_gb)s, %(max_concurrency)s, %(version)s,
+                %(revision)s, now())
         ON CONFLICT (id) DO UPDATE SET
             hostname = EXCLUDED.hostname, device = EXCLUDED.device,
             device_name = EXCLUDED.device_name,
             free_gpu_gb = EXCLUDED.free_gpu_gb,
             max_concurrency = EXCLUDED.max_concurrency,
-            version = EXCLUDED.version, last_seen = now()
+            version = EXCLUDED.version, revision = EXCLUDED.revision,
+            last_seen = now()
         """,
         w,
     )
@@ -249,6 +251,71 @@ def _load_segment_timings(work_dir: Path, key) -> list | None:
         return None
 
 
+# A shade under the 0.4s pause the synth inserts, so a boundary cannot be
+# missed to rounding, and well above anything that occurs inside speech.
+_PAUSE_FLOOR_SECONDS = 0.30
+
+
+def _derive_segment_timings(path: Path, chunks: list[str] | None) -> list | None:
+    """Recover a segment's chunk timings from the audio itself.
+
+    For books narrated before timings were recorded. Chunks are joined with a
+    pause of *digital* silence — literal zero samples, not a quiet passage — so
+    the boundaries are still in the file exactly where they were put, and
+    finding them is a scan rather than an estimate. That turns "narrate the
+    whole book again" into a pass over audio already on disk: minutes instead
+    of a day.
+
+    Returns None unless the pauses divide the segment into exactly as many
+    pieces as it had chunks. Any disagreement means this audio did not come
+    from this chunking, and a reader that highlights the wrong sentence is
+    worse than one that highlights nothing.
+    """
+    if not chunks or not path.is_file():
+        return None
+    try:
+        import numpy as np
+        import soundfile as sf
+
+        audio, rate = sf.read(str(path), dtype="float32")
+    except Exception:
+        return None
+    if getattr(audio, "ndim", 1) > 1:
+        audio = audio[:, 0]
+
+    silent = audio == 0.0
+    edges = np.diff(silent.astype(np.int8))
+    starts = np.flatnonzero(edges == 1) + 1
+    ends = np.flatnonzero(edges == -1) + 1
+    if silent[0]:
+        starts = np.r_[0, starts]
+    if silent[-1]:
+        ends = np.r_[ends, len(audio)]
+
+    floor = int(_PAUSE_FLOOR_SECONDS * rate)
+    spoken: list[tuple[float, float]] = []
+    cursor = 0
+    for start, end in zip(starts, ends):
+        if end - start < floor:
+            continue
+        if start > cursor:
+            spoken.append((cursor / rate, start / rate))
+        cursor = end
+    if cursor < len(audio):
+        spoken.append((cursor / rate, len(audio) / rate))
+
+    if len(spoken) != len(chunks):
+        log.warning(
+            "%s: %d chunks but %d spoken runs — leaving it untimed",
+            path.name, len(chunks), len(spoken),
+        )
+        return None
+    return [
+        {"text": text, "start": round(start, 3), "end": round(end, 3)}
+        for text, (start, end) in zip(chunks, spoken)
+    ]
+
+
 def build_timeline(chapters, segments, seg_seconds, seg_timings, work_dir) -> dict:
     """Turn per-segment timings into offsets within the finished audiobook.
 
@@ -261,9 +328,17 @@ def build_timeline(chapters, segments, seg_seconds, seg_timings, work_dir) -> di
     offset = 0.0
     for position, units in enumerate(segments):
         chapter_start = offset
-        for part, _ in enumerate(units):
+        for part, (seg_path, seg_chunks) in enumerate(units):
             key = (position, part)
-            chunks = seg_timings.get(key) or _load_segment_timings(work_dir, key) or []
+            # Just rendered, then the sidecar from an earlier run, and only
+            # then the audio itself — the last is for books whose segments were
+            # narrated before any timings were kept.
+            chunks = (
+                seg_timings.get(key)
+                or _load_segment_timings(work_dir, key)
+                or _derive_segment_timings(seg_path, seg_chunks)
+                or []
+            )
             for c in chunks:
                 book_chunks.append({
                     "chapter": position,

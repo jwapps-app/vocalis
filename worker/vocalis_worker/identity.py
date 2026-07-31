@@ -19,6 +19,21 @@ from pathlib import Path
 
 from . import config
 
+# What this narrator can do, as a number the server can compare against.
+#
+# The narrator is installed separately and never updates itself, so a server
+# can be running ahead of it indefinitely. That is not hypothetical: timing
+# capture shipped in the server while an older narrator kept producing books
+# without timings, and the only symptom was a missing button — no error, no
+# warning, and a day of narration to redo. The server now checks this and says
+# so.
+#
+# Raise it whenever the worker gains something the server offers a feature on
+# top of, and add the matching entry to REQUIRED_WORKER_REVISION in the API.
+#   1  the original HTTP-transport worker
+#   2  records chunk timings, enabling read-along and chapter marks
+REVISION = 2
+
 log = logging.getLogger(__name__)
 
 _PROBE = """
@@ -123,6 +138,7 @@ def refresh() -> dict:
         "id": worker_id(),
         "hostname": socket.gethostname(),
         "version": platform.platform(terse=True),
+        "revision": REVISION,
         **probe,
         "max_concurrency": safe_concurrency(99, probe.get("free_gpu_gb")),
     }

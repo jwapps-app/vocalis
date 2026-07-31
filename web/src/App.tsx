@@ -278,6 +278,7 @@ export default function App() {
     new URLSearchParams(window.location.search).get("view") === "setup" ? "setup" : "library"
   );
   const [worker, setWorker] = useState<Worker | null>(null);
+  const [requiredRevision, setRequiredRevision] = useState(1);
   const [workerLoaded, setWorkerLoaded] = useState(false);
   /* Where the app is before it will show anything.
    *
@@ -298,7 +299,10 @@ export default function App() {
   useEffect(() => {
     const tick = () =>
       getWorker()
-        .then((r) => setWorker(r.worker))
+        .then((r) => {
+          setWorker(r.worker);
+          setRequiredRevision(r.required_revision);
+        })
         .catch(() => {})
         .finally(() => setWorkerLoaded(true));
     tick();
@@ -380,6 +384,11 @@ export default function App() {
   // Only nag when it actually matters: work is queued and nothing is there to
   // narrate it. A green narrator or an empty queue needs no banner.
   const stalled = offline && waiting > 0;
+  // A narrator older than the server still narrates — it just silently leaves
+  // out whatever it was never taught to record, and the only visible trace is
+  // a button that never appears. Say it plainly instead.
+  const outdated =
+    workerLoaded && worker !== null && worker.revision < requiredRevision;
 
   if (gate === "loading") {
     return (
@@ -470,6 +479,17 @@ export default function App() {
           )}
         </nav>
       </header>
+
+      {outdated && tab === "library" && (
+        <div className="notice warn">
+          <strong>Your narrator is out of date.</strong> It will still record
+          books, but without the read-along and chapter marks this version adds.{" "}
+          <button className="linklike" onClick={() => setTab("setup")}>
+            Reinstall it
+          </button>{" "}
+          to get them.
+        </div>
+      )}
 
       {stalled && tab === "library" && (
         <div className="notice warn">

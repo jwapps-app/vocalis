@@ -85,6 +85,7 @@ MIGRATIONS = [
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS audio_seconds REAL",
     "ALTER TABLE workers ADD COLUMN IF NOT EXISTS free_gpu_gb REAL",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS timings JSONB",
+    "ALTER TABLE workers ADD COLUMN IF NOT EXISTS revision INT",
 ]
 
 
@@ -173,6 +174,11 @@ BUNDLE_ROOT = Path(os.environ.get("BUNDLE_ROOT", "/srv/bundle"))
 # the host-published port (127.0.0.1:5445); for a worker on another machine,
 # set WORKER_DB_HOSTPORT to the server's LAN address and open the port.
 WORKER_DB_HOSTPORT = os.environ.get("WORKER_DB_HOSTPORT", "127.0.0.1:5445")
+
+# The narrator revision this server expects — see identity.REVISION in the
+# worker. A narrator below it is out of date, and the UI says so rather than
+# letting features go missing without explanation.
+REQUIRED_WORKER_REVISION = 2
 
 # A worker whose heartbeat is older than this reads as offline. Comfortably
 # above the worker's poll interval so a busy narrator is never called dead.
@@ -999,7 +1005,7 @@ def worker_status(request: Request):
         row = conn.execute(
             """
             SELECT hostname, device, device_name, free_gpu_gb, max_concurrency,
-                   version, last_seen,
+                   version, COALESCE(revision, 1) AS revision, last_seen,
                    now() - last_seen < %s * interval '1 second' AS online
             FROM workers ORDER BY last_seen DESC LIMIT 1
             """,
@@ -1007,6 +1013,10 @@ def worker_status(request: Request):
         ).fetchone()
     return {
         "worker": row,
+        # What this server needs to offer everything it knows how to. A narrator
+        # below it still narrates; it just quietly produces books missing
+        # whatever it was never taught to record.
+        "required_revision": REQUIRED_WORKER_REVISION,
         # Built here so the page never has to assemble an address or a key.
         # Quoted: zsh is the default shell on macOS and treats '?' as a glob,
         # so an unquoted URL with a query string fails with "no matches found"

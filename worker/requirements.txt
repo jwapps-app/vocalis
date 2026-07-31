@@ -8,4 +8,8 @@ chatterbox-tts
 setuptools<81
 torch
 torchaudio
+# Used directly to recover chunk boundaries from already-narrated audio, so
+# declared rather than leant on as a torch/torchaudio transitive.
+numpy
+soundfile
 psycopg[binary]==3.2.*

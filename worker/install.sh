@@ -100,6 +100,41 @@ case "$(uname -s)" in
   *) die "unsupported system $(uname -s). See the setup page for Windows." ;;
 esac
 
+# ------------------------------------------------------------------ location
+#
+# Move the bundle somewhere permanent before anything is built on top of it.
+#
+# The one-line installer unpacks into `mktemp -d`, which on macOS lives under
+# /var/folders and is periodically deleted by the system. Installing in place
+# put the virtualenv and the worker's own source there and wrote that path into
+# the launch agent, so the narrator was one temp sweep away from vanishing —
+# with no error anywhere, just a service pointing at a directory that no longer
+# exists.
+#
+# An existing install is written over rather than replaced: .venv sits inside
+# the destination and holds a multi-gigabyte PyTorch, so keeping it is the
+# difference between a reinstall taking seconds and taking a download.
+if [ "$OS" = mac ]; then
+  DEST="$HOME/Library/Application Support/Vocalis/narrator"
+else
+  DEST="${XDG_DATA_HOME:-$HOME/.local/share}/vocalis/narrator"
+fi
+
+if [ "$HERE" != "$DEST" ]; then
+  say "Installing to $DEST"
+  mkdir -p "$DEST"
+  # The service may be running from these very files.
+  if [ "$OS" = mac ]; then
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  else
+    systemctl --user stop vocalis-worker.service 2>/dev/null || true
+  fi
+  # -R over the *contents*; a trailing /. copies into DEST rather than under it.
+  cp -R "$HERE/." "$DEST/" || die "could not copy the narrator to $DEST"
+  HERE="$DEST"
+fi
+VENV="$HERE/worker/.venv"
+
 # ------------------------------------------------------------------- python
 #
 # PyTorch and Chatterbox lag new Python releases, and the system python3 is

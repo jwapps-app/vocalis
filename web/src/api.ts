@@ -69,6 +69,10 @@ export interface Worker {
   free_gpu_gb: number | null;
   max_concurrency: number | null;
   version: string | null;
+  /** What the narrator can do, as a number. Below the server's
+   *  required_revision means an old install that will quietly skip
+   *  whatever it was never taught to record. */
+  revision: number;
   last_seen: string;
   online: boolean;
 }
@@ -200,7 +204,9 @@ export const getChapterMarks = (jobId: string) =>
 
 export const bundleUrl = "/api/worker/bundle";
 export const getWorker = () =>
-  req<{ worker: Worker | null; install_command: string }>("/api/worker");
+  req<{ worker: Worker | null; required_revision: number; install_command: string }>(
+    "/api/worker"
+  );
 
 export const listNarrators = () => req<Narrator[]>("/api/narrators");
 export const listJobs = () => req<Job[]>("/api/jobs");
