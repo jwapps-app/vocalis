@@ -500,3 +500,13 @@ Cloudflare Tunnel are the usual options.
 - `api/` — FastAPI: analyze, review, start, status, download
 - `worker/` — native pipeline: plan → clean → Chatterbox synth → ffmpeg M4B
 - `web/` — React/TS UI (nginx serves it and proxies `/api` to the API)
+
+## License
+
+[AGPL-3.0](LICENSE) — you're free to use, modify, and self-host this software;
+if you run a modified version as a network service, you must make your source
+available to its users.
+
+The pieces it builds on keep their own terms: Chatterbox (MIT), and the bundled
+narrator clips, which were synthesized with Kokoro-82M (Apache-2.0). Both are
+compatible with the AGPL.
