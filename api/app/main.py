@@ -856,6 +856,16 @@ def start(
         return _fetch(conn, job_id)
 
 
+def _narrator_online(conn) -> bool:
+    """Whether any narrator has reported in recently enough to be listening."""
+    row = conn.execute(
+        "SELECT now() - last_seen < %s * interval '1 second' AS online"
+        " FROM workers ORDER BY last_seen DESC LIMIT 1",
+        (WORKER_STALE_SECONDS,),
+    ).fetchone()
+    return bool(row and row["online"])
+
+
 @app.post("/api/jobs/{job_id}/cancel")
 def cancel(job_id: uuid.UUID):
     """Stop a job. Chapters already narrated stay cached, so it can resume."""
@@ -866,6 +876,20 @@ def cancel(job_id: uuid.UUID):
         if row["status"] == "queued":
             # Never claimed, so nothing is running to interrupt.
             conn.execute("UPDATE jobs SET status = 'cancelled' WHERE id = %s", (job_id,))
+        elif row["status"] in RUNNING and not _narrator_online(conn):
+            # Marked as running, but no narrator has checked in — so there is
+            # nobody to notice the flag, and setting it would leave the book
+            # saying "Stopping…" for as long as anyone cared to wait. This is
+            # the state a narrator leaves behind when it loses the database
+            # mid-book: the job it was working is still marked running, and the
+            # failure it would have recorded needed the connection that died.
+            # Cancel it outright; the audio already narrated stays cached, so
+            # Resume picks it up exactly as it would have.
+            conn.execute(
+                "UPDATE jobs SET status = 'cancelled', cancel_requested = false,"
+                " updated_at = now() WHERE id = %s",
+                (job_id,),
+            )
         elif row["status"] in RUNNING:
             # The worker checks this between chunks and stops within seconds.
             conn.execute(

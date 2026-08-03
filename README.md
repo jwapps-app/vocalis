@@ -364,10 +364,21 @@ enough that threads barely overlap, and a model instance is not safe to share.
 ### Crash recovery
 
 A job interrupted by a crash, reboot, or `kill` still reads as `synthesizing`
-even though no worker owns it. On startup the worker re-queues anything left
-in a running state and continues it, reusing cached chapters. This assumes a
-**single worker** — running more than one would need a lease or heartbeat so
-they don't steal each other's jobs.
+even though no worker owns it. The worker re-queues anything left in a running
+state and continues it, reusing cached chapters. This assumes a **single
+worker** — running more than one would need a lease or heartbeat so they don't
+steal each other's jobs.
+
+That check runs on every idle poll, not only at startup. Tying it to startup
+left one way to strand a book permanently: lose the database mid-narration —
+a server redeploy is enough — and the job stays marked running, while the
+handler that would record the failure needs the very connection that just
+died. Since `claim_job` only ever takes a `queued` row, nothing would touch it
+again. Cancelling did not help either, because cancelling a running job sets a
+flag for the owning worker to notice and there was no owner: the book sat at
+*Stopping…* indefinitely. Now an idle narrator treats any job still marked
+running as nobody's and re-queues it, and the API cancels outright when no
+narrator has checked in, rather than waiting on one that will never answer.
 
 The worker traps `SIGTERM` and raises `SystemExit` rather than letting Python
 stop the interpreter outright, so `ChapterPool.__exit__` runs and terminates

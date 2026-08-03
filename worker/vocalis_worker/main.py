@@ -85,7 +85,8 @@ def requeue_orphans(conn: psycopg.Connection) -> None:
         """
     ).fetchall()
     for row in rows:
-        log.info("Re-queued %s, interrupted by a restart", row["id"])
+        log.info("Re-queued %s — it was marked running with nobody narrating it",
+                 row["id"])
 
 
 def heartbeat(conn: psycopg.Connection) -> None:
@@ -607,6 +608,21 @@ def run() -> None:
                 heartbeat(conn)
                 job = claim_job(conn)
                 if job is None:
+                    # Nothing to claim — so this narrator is not working on
+                    # anything, and with a single narrator that makes every job
+                    # still marked running an orphan by definition.
+                    #
+                    # Tying the rescue to startup alone was not enough. Losing
+                    # the database mid-book strands the job that was running:
+                    # the handler that would mark it failed needs the very
+                    # connection that died, so nothing is recorded, and
+                    # claim_job only ever takes a `queued` row. The job could
+                    # then be neither narrated nor cancelled — it just said
+                    # "Stopping…" until someone restarted the worker. Checking
+                    # here catches that within one poll, and covers the idle
+                    # case too, where the connection is replaced each pass and
+                    # the loss is never even seen as an error.
+                    requeue_orphans(conn)
                     time.sleep(config.POLL_INTERVAL_SECONDS)
                     continue
                 try:
