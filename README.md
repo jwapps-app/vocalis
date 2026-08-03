@@ -38,9 +38,14 @@ can be pasted straight into Portainer. To build from this checkout instead:
 docker compose -f docker-compose.yml -f docker-compose.build.yml up -d --build
 ```
 
-Open <http://localhost:8091>. **The first page asks you to choose a password**;
-Vocalis is locked to a single one from then on. Set it before putting the
-server anywhere other people can reach.
+Open <http://localhost:8091>. **The first page asks you to choose a username
+and password**; Vocalis is locked to that single account from then on. Set it
+before putting the server anywhere other people can reach.
+
+Upgrading an instance that predates usernames? It keeps working, signs in on
+the password alone, and asks you to pick a username once — your password is
+unchanged. No default name is assigned, because `admin` on every Vocalis that
+ever upgraded would be half the credential given away.
 
 If the narrator will run on a *different* machine from the server, also set
 `DB_BIND` and `WORKER_DB_HOSTPORT` — see `.env.example`. Otherwise Postgres
@@ -150,9 +155,19 @@ time against the 24h target. The worker also updates this estimate live in
 Vocalis is built for a home network. Know what it does and does not do before
 putting it anywhere else.
 
-- **One password, one user.** Set on first load, stored as a salted hash. There
-  are no accounts and no roles. Everything except the login and the narrator's
-  own enrolment is closed by default.
+- **One account.** A username and password, chosen on first load and stored as
+  a bcrypt hash. There are no roles and no second user. Everything except the
+  login and the narrator's own enrolment is closed by default.
+- **Sign-in attempts are rate limited.** Five free tries, then a doubling pause
+  up to thirty seconds, forgotten after fifteen minutes of quiet. The count is
+  kept for the instance rather than per client address, because behind a
+  reverse proxy the address is a header the caller controls — blocking on it
+  would look stricter and stop nothing. The trade is that someone hammering
+  the login can make you wait up to thirty seconds; it is a pause, not a
+  lockout.
+- **A wrong username and a wrong password are indistinguishable** — same
+  message, and the password is hashed either way so the answer takes the same
+  time. Measured at 199 ms against 192 ms.
 - **The session is a cookie** (`HttpOnly`, `SameSite=Lax`), not a bearer token,
   because `<audio>`, `<img>` and download links cannot send an `Authorization`
   header and the player and reader depend on them.

@@ -107,6 +107,9 @@ CREATE TABLE workers (
 -- a schema is a needless way for a fresh deployment to fail.
 CREATE TABLE instance (
   id                 BOOLEAN PRIMARY KEY DEFAULT true CHECK (id),
+  -- Nullable: instances created before usernames existed sign in on the
+  -- password alone until one is chosen.
+  username           TEXT,
   password_hash      TEXT,
   -- Signs browser sessions. Generated once; rotating it logs everyone out.
   secret_key         TEXT,

@@ -14,6 +14,7 @@ import EditChapters from "./EditChapters";
 import Player from "./Player";
 import Reader from "./Reader";
 import Login from "./Login";
+import ChooseUsername from "./ChooseUsername";
 import Review from "./Review";
 import Setup from "./Setup";
 import { InstallButton } from "./Install";
@@ -292,7 +293,7 @@ export default function App() {
    * and the first-run screen was unreachable. A new install would run wide
    * open and never mention it. */
   const [gate, setGate] = useState<
-    "loading" | "setup" | "login" | "ready" | "unreachable"
+    "loading" | "setup" | "login" | "name-yourself" | "ready" | "unreachable"
   >("loading");
   const fileRef = useRef<HTMLInputElement>(null);
 
@@ -332,11 +333,13 @@ export default function App() {
       // Bounded: a request that never settles used to leave the app rendering
       // nothing at all — a blank page, with no error and nothing to retry.
       // A server that hangs is commoner than one that refuses.
-      const { configured } = await withTimeout(authStatus(), 8000);
+      const { configured, username_set } = await withTimeout(authStatus(), 8000);
       if (!configured) return setGate("setup");
       try {
         await withTimeout(listJobs(), 8000);
-        setGate("ready");
+        // Signed in, but this instance predates usernames. Ask for one now
+        // rather than leaving it signing in on half a credential.
+        setGate(username_set ? "ready" : "name-yourself");
       } catch (err) {
         setGate(err instanceof Unauthorized ? "login" : "unreachable");
       }
@@ -426,6 +429,21 @@ export default function App() {
     );
   }
 
+  if (gate === "name-yourself") {
+    return (
+      <div className="page">
+        <header className="masthead">
+          <img className="logo" src="/icon.svg" alt="" width="52" height="52" />
+          <div>
+            <h1>Vocalis</h1>
+            <p className="tagline">EPUB to audiobook, narrated locally.</p>
+          </div>
+        </header>
+        <ChooseUsername onChosen={() => { setGate("ready"); refreshJobs(); }} />
+      </div>
+    );
+  }
+
   if (gate === "setup" || gate === "login") {
     return (
       <div className="page">
@@ -436,7 +454,7 @@ export default function App() {
             <p className="tagline">EPUB to audiobook, narrated locally.</p>
           </div>
         </header>
-        <Login onAuthenticated={() => { setGate("ready"); refreshJobs(); }} />
+        <Login onAuthenticated={() => { checkGate(); refreshJobs(); }} />
       </div>
     );
   }

@@ -115,21 +115,35 @@ async function req<T>(url: string, init?: RequestInit): Promise<T> {
   return res.json();
 }
 
-export const authStatus = () => req<{ configured: boolean }>("/api/auth/status");
+export const authStatus = () =>
+  req<{ configured: boolean; username_set: boolean }>("/api/auth/status");
 
-async function authenticate(path: string, password: string): Promise<void> {
+async function authenticate(
+  path: string,
+  body: { username: string; password: string }
+): Promise<void> {
   await req<{ ok: boolean }>(path, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ password }),
+    body: JSON.stringify(body),
   });
 }
 
 export const logout = () => req<{ ok: boolean }>("/api/auth/logout", { method: "POST" });
 
-export const login = (password: string) => authenticate("/api/auth/login", password);
-export const setupPassword = (password: string) =>
-  authenticate("/api/auth/setup", password);
+export const login = (username: string, password: string) =>
+  authenticate("/api/auth/login", { username, password });
+
+export const setupCredentials = (username: string, password: string) =>
+  authenticate("/api/auth/setup", { username, password });
+
+/** Name an instance created before usernames existed. Session required. */
+export const chooseUsername = (username: string) =>
+  req<{ ok: boolean }>("/api/auth/username", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username }),
+  });
 
 export const previewUrl = (id: string) => `/api/narrators/${id}/preview`;
 export const coverUrl = (jobId: string) => `/api/jobs/${jobId}/cover`;

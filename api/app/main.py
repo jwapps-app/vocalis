@@ -22,11 +22,16 @@ from .db import pool
 from .narrators import list_narrators, resolve
 from .security import (
     SESSION_DAYS,
+    has_username,
     is_configured,
+    login_wait,
     mint_session,
-    set_password,
+    note_login_failure,
+    note_login_success,
     session_valid,
-    verify_password,
+    set_credentials,
+    set_username,
+    verify_credentials,
     worker_token,
 )
 
@@ -86,6 +91,9 @@ MIGRATIONS = [
     "ALTER TABLE workers ADD COLUMN IF NOT EXISTS free_gpu_gb REAL",
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS timings JSONB",
     "ALTER TABLE workers ADD COLUMN IF NOT EXISTS revision INT",
+    # Nullable on purpose: an instance set up before usernames existed keeps
+    # working on its password, and is asked to choose a name once.
+    "ALTER TABLE instance ADD COLUMN IF NOT EXISTS username TEXT",
 ]
 
 
@@ -198,7 +206,7 @@ WEB_PORT = os.environ.get("WEB_PORT", "8091")
 
 @app.get("/api/auth/status")
 def auth_status():
-    return {"configured": is_configured()}
+    return {"configured": is_configured(), "username_set": has_username()}
 
 
 SESSION_COOKIE = "vocalis_session"
@@ -230,20 +238,58 @@ def _issue_session(request: Request) -> JSONResponse:
 
 
 @app.post("/api/auth/setup", status_code=201)
-def auth_setup(request: Request, password: str = Body(..., embed=True)):
-    """Choose the password, once. Refuses to overwrite an existing one, or
+def auth_setup(
+    request: Request,
+    username: str = Body(..., embed=True),
+    password: str = Body(..., embed=True),
+):
+    """Choose the credentials, once. Refuses to overwrite existing ones, or
     anyone who can reach the port could take the instance over."""
     if is_configured():
         raise HTTPException(409, "A password is already set")
-    set_password(password)
+    set_credentials(username, password)
     return _issue_session(request)
 
 
 @app.post("/api/auth/login")
-def auth_login(request: Request, password: str = Body(..., embed=True)):
-    if not verify_password(password):
-        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Wrong password")
+def auth_login(
+    request: Request,
+    password: str = Body(..., embed=True),
+    username: str = Body("", embed=True),
+):
+    """Sign in.
+
+    One message for every kind of failure. Saying "no such user" would confirm
+    a guessed name for free, and the username is half of what an exposed
+    instance is protected by.
+    """
+    wait = login_wait()
+    if wait > 0:
+        raise HTTPException(
+            status.HTTP_429_TOO_MANY_REQUESTS,
+            "Too many attempts. Try again shortly.",
+            headers={"Retry-After": str(int(wait) + 1)},
+        )
+    if not verify_credentials(username, password):
+        note_login_failure()
+        raise HTTPException(
+            status.HTTP_401_UNAUTHORIZED, "Wrong username or password"
+        )
+    note_login_success()
     return _issue_session(request)
+
+
+@app.post("/api/auth/username")
+def auth_set_username(username: str = Body(..., embed=True)):
+    """Name an instance that was set up before usernames existed.
+
+    Behind the session check like everything else, so it is the person already
+    signed in who chooses — and once set, the ordinary login path applies.
+    """
+    if has_username():
+        raise HTTPException(409, "A username is already set")
+    set_username(username)
+    return {"ok": True}
 
 
 @app.post("/api/auth/logout")
