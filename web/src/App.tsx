@@ -41,8 +41,13 @@ function humanSize(bytes: number): string {
 
 function duration(seconds: number): string {
   if (seconds < 60) return `${Math.round(seconds)}s`;
-  const h = Math.floor(seconds / 3600);
-  const m = Math.round((seconds % 3600) / 60);
+  // Round to whole minutes *first*, then split. Rounding the remainder on its
+  // own lets it reach 60 without the hour ever noticing: a book of 32,380
+  // seconds has 59.67 minutes left over after eight hours, and was displayed
+  // as "8h 60m".
+  const total = Math.round(seconds / 60);
+  const h = Math.floor(total / 60);
+  const m = total % 60;
   return h > 0 ? `${h}h ${m}m` : `${m}m`;
 }
 

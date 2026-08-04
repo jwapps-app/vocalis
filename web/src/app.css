@@ -179,13 +179,27 @@ form {
   color: var(--muted);
 }
 
+/* Present for screen readers and for clicking through, absent from layout.
+ *
+ * Marked !important because this is a utility whose entire job is to beat
+ * whatever styles the element would otherwise attract, and a bare class loses
+ * to anything more specific. It did: `input[type="file"]` below is an element
+ * plus an attribute, which outranks a single class, so the hidden upload input
+ * kept its `width: 100%` and sat there as a full-width box absolutely
+ * positioned inside the page padding. Nothing was visible, but the document
+ * was wider than the screen and the whole app slid sideways under your thumb —
+ * on a phone, where there is no scrollbar to explain why. */
 .visually-hidden {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
+  position: absolute !important;
+  width: 1px !important;
+  height: 1px !important;
+  padding: 0 !important;
+  margin: -1px !important;
+  overflow: hidden !important;
   clip: rect(0 0 0 0);
-  white-space: nowrap;
+  clip-path: inset(50%);
+  white-space: nowrap !important;
+  border: 0 !important;
 }
 
 .dropzone {
