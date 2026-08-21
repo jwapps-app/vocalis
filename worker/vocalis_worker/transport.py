@@ -39,11 +39,64 @@ def _url(path: str) -> str:
     return f"{config.API_URL.rstrip('/')}{path}"
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, *_args, **_kwargs):
+        return None
+
+
+def check_base_url() -> None:
+    """Warn at startup if the API address redirects somewhere else.
+
+    A redirect is survivable for the small requests — urllib follows it — and
+    fatal for the one that matters. Posting a finished audiobook means writing
+    a hundred megabytes; the server answers 301 and closes the connection long
+    before that finishes, and the error surfaces as "Broken pipe" with nothing
+    naming the cause. Hours of narration then fail at the last step, and the
+    address in the log looks perfectly correct.
+
+    That is exactly what a proxy in front of a site does with http:// when the
+    site is served over TLS. Cheaper to say so once at startup than to let it
+    be discovered at the end of a book.
+    """
+    opener = urllib.request.build_opener(_NoRedirect)
+    request = urllib.request.Request(_url("/api/auth/status"), headers=_headers())
+    try:
+        opener.open(request, timeout=15)
+    except urllib.error.HTTPError as exc:
+        target = exc.headers.get("Location") if exc.headers else None
+        if exc.code in (301, 302, 307, 308) and target:
+            base = target.split("/api/")[0] or target
+            log.error(
+                "%s redirects to %s. Uploading a finished book will fail there."
+                " Set VOCALIS_API_URL to %s and restart.",
+                config.API_URL, target, base,
+            )
+    except OSError as exc:
+        log.warning("Could not reach %s at startup (%s)", config.API_URL, exc)
+
+
+# urllib announces itself as "Python-urllib/3.x", which sits on the default
+# block list of every bot-protection service there is. Cloudflare returns 403
+# to it — and on an upload it returns that 403 and closes the connection while
+# the narrator is still writing a hundred megabytes, so an entire book dies at
+# the last step reporting "Broken pipe", with nothing naming a user agent.
+#
+# Saying who we are costs one header and makes the narrator work through the
+# proxy people put a self-hosted service behind.
+USER_AGENT = "Vocalis-Narrator/1.0 (+https://github.com/jwapps-app/vocalis)"
+
+
 def _headers() -> dict:
-    """The narrator's credential. It cannot log in — it runs unattended on
-    another machine — so it presents a token the server issued and shipped
-    inside the worker bundle, which is itself behind the password."""
-    return {"X-Vocalis-Worker": config.WORKER_TOKEN} if config.WORKER_TOKEN else {}
+    """The narrator's credential, and a name for the proxies in between.
+
+    It cannot log in — it runs unattended on another machine — so it presents a
+    token the server issued and shipped inside the worker bundle, which is
+    itself behind the password.
+    """
+    headers = {"User-Agent": USER_AGENT}
+    if config.WORKER_TOKEN:
+        headers["X-Vocalis-Worker"] = config.WORKER_TOKEN
+    return headers
 
 
 def download(path: str, dest: Path) -> bool:

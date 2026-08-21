@@ -171,6 +171,17 @@ putting it anywhere else.
 - **The session is a cookie** (`HttpOnly`, `SameSite=Lax`), not a bearer token,
   because `<audio>`, `<img>` and download links cannot send an `Authorization`
   header and the player and reader depend on them.
+- **Behind a proxy, use the https address.** The Setup page builds the install
+  command from `X-Forwarded-Proto`, so it gets this right on its own — but a
+  narrator pointed at `http://` on a TLS site is told to call an address that
+  redirects, and while small requests follow a redirect, a POST does not. The
+  proxy answers 301 and closes while the narrator is still sending, so a
+  finished book fails at the last step as "Broken pipe". The narrator checks
+  its own address at startup and says so.
+- **Bot protection will block the narrator unless it names itself.** urllib
+  announces "Python-urllib", which Cloudflare 403s by default; on an upload
+  that arrives as the same "Broken pipe" after hours of narration. It now sends
+  a real User-Agent.
 - **No TLS of its own.** It serves plain HTTP. On a LAN that means the password
   crosses the network in the clear, and browsers will not install the PWA or
   register a service worker outside a secure context. Put it behind something

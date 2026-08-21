@@ -1066,7 +1066,17 @@ def _public_api_url(request: Request) -> str:
         return override.rstrip("/")
     host = request.headers.get("host")
     if host:
-        return f"{request.url.scheme}://{host}"
+        # X-Forwarded-Proto, not the scheme of this request. Behind a reverse
+        # proxy the request reaches this container over plain HTTP however the
+        # browser arrived, so the scheme here reads "http" on a site served
+        # over TLS — and the narrator was then told to call an address that
+        # redirects. Small requests survive a redirect; a POST does not. The
+        # server answers 301 and closes while the narrator is still sending,
+        # and a finished audiobook dies as "Broken pipe" after hours of work.
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+        # A proxy chain can send a list; the first entry is the client's.
+        scheme = scheme.split(",")[0].strip() or request.url.scheme
+        return f"{scheme}://{host}"
     # No Host header at all (a bare HTTP/1.0 client); fall back to the address
     # the worker is already told to reach Postgres on.
     return f"http://{WORKER_DB_HOSTPORT.split(':')[0]}:{WEB_PORT}"

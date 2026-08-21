@@ -676,6 +676,7 @@ def run() -> None:
                         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     signal.signal(signal.SIGTERM, _exit_on_sigterm)
     log.info("Worker ready (api=%s, scratch=%s)", config.API_URL, config.WORK_DIR)
+    transport.check_base_url()
     config.WORK_DIR.mkdir(parents=True, exist_ok=True)
 
     startup = True
