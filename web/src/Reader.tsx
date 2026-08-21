@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { downloadUrl, getReadable, Job, ReadChapter } from "./api";
-import { seekWhenReady } from "./media";
+import { rememberRate, seekWhenReady, SPEEDS, storedRate } from "./media";
 
 /**
  * Read the book while it is narrated, with the sentence being spoken lit up.
@@ -32,6 +32,7 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [at, setAt] = useState(0);
+  const [rate, setRate] = useState(storedRate);
   const [follow, setFollow] = useState(true);
 
   useEffect(() => {
@@ -44,6 +45,7 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
   useEffect(() => {
     const el = new Audio(downloadUrl(job));
     el.preload = "metadata";
+    el.playbackRate = rate;
     audio.current = el;
     const onTime = () => setAt(el.currentTime);
     const onEnd = () => setPlaying(false);
@@ -102,12 +104,38 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
    */
   const cursor = useRef<HTMLDivElement | null>(null);
 
+  /* Every word in the book, in the order it is spoken, with where to find it
+     on the page. Flat and ordered so the frame loop can binary search it. */
+  type Stop = { at: number; key: string; chunk: number; index: number };
+  const timeline = useMemo<Stop[]>(() => {
+    const out: Stop[] = [];
+    chapters?.forEach((ch, ci) =>
+      ch.blocks.forEach((b, bi) =>
+        b.chunks.forEach((c, chunk) =>
+          c.words?.forEach((w, index) =>
+            out.push({ at: w.start, key: `${ci}-${bi}`, chunk, index })
+          )
+        )
+      )
+    );
+    return out;
+  }, [chapters]);
+
   useEffect(() => {
     const pane = body.current;
     const pill = cursor.current;
-    if (!pane || !pill || !spans.length) return;
+    if (!pane || !pill || timeline.length < 2) return;
     let frame = 0;
     let painted = -1;
+    let cachedAt = -1;
+    let here: HTMLElement | null = null;
+    let next: HTMLElement | null = null;
+
+    const find = (stop: Stop) =>
+      pane.querySelector<HTMLElement>(
+        `[data-key="${stop.key}"] [data-chunk="${stop.chunk}"] ` +
+        `.word:nth-of-type(${stop.index + 1})`
+      );
 
     const paint = () => {
       frame = requestAnimationFrame(paint);
@@ -117,58 +145,70 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
       if (t === painted) return;        // paused, and nothing has moved
       painted = t;
 
-      let lo = 0, hi = spans.length - 1, span: Span | null = null;
+      // The last word begun, and the one after it.
+      let lo = 0, hi = timeline.length - 1, k = -1;
       while (lo <= hi) {
         const mid = (lo + hi) >> 1;
-        if (t < spans[mid].start) hi = mid - 1;
-        else if (t > spans[mid].end) lo = mid + 1;
-        else { span = spans[mid]; break; }
+        if (timeline[mid].at <= t) { k = mid; lo = mid + 1; } else hi = mid - 1;
       }
-      if (!span || !span.words.length) {
+      if (k < 0 || k >= timeline.length - 1) {
         pill.style.opacity = "0";
         return;
       }
 
-      // Which word, and how far through it — the fraction is what makes this
-      // move continuously instead of landing on each word in turn.
-      let i = 0;
-      while (i + 1 < span.words.length && t >= span.words[i + 1].start) i++;
-      const word = span.words[i];
-      const width = word.end - word.start;
-      const through = width > 0.01
-        ? Math.min(1, Math.max(0, (t - word.start) / width))
-        : 1;
-
-      const nodes = pane.querySelectorAll<HTMLElement>(
-        `[data-key="${span.blockKey}"] [data-chunk="${span.chunkIndex}"] .word`
-      );
-      const here = nodes[i];
+      if (k !== cachedAt) {
+        here = find(timeline[k]);
+        next = find(timeline[k + 1]);
+        cachedAt = k;
+      }
       if (!here) { pill.style.opacity = "0"; return; }
-      const next = nodes[i + 1];
+
+      /* Measured start-to-start, not across the word itself.
+       *
+       * A word's own duration ends where the silence begins, so interpolating
+       * over it means arriving early and then waiting — and the narrator's
+       * pauses are long enough to see, nearly a second inside one sentence.
+       * Spanning the whole interval instead means the highlight is always in
+       * motion, drifting through a pause rather than stopping dead in it. */
+      const span = timeline[k + 1].at - timeline[k].at;
+      const f = span > 0.01 ? Math.min(1, Math.max(0, (t - timeline[k].at) / span)) : 1;
 
       let left = here.offsetLeft;
       let top = here.offsetTop;
-      let w = here.offsetWidth;
+      let width = here.offsetWidth;
 
-      // Slide towards the next word as this one is finished, so the highlight
-      // is genuinely between the two at a boundary and covers a little of
-      // each. Only along a line: lerping to a word on the next line would send
-      // it flying diagonally across the paragraph, so there it simply waits
-      // and steps over once the voice has actually arrived.
+      let visible = 1;
       if (next) {
         if (next.offsetTop === top) {
-          left += (next.offsetLeft - left) * through;
-          w += (next.offsetWidth - w) * through;
-        } else if (through > 0.92) {
-          left = next.offsetLeft;
-          top = next.offsetTop;
-          w = next.offsetWidth;
+          left += (next.offsetLeft - left) * f;
+          width += (next.offsetWidth - width) * f;
+        } else {
+          /* A line break, where the two words have no path between them.
+           *
+           * Holding on one until the voice reaches the other is what made this
+           * stop dead — nearly eight hundred milliseconds of stillness at the
+           * end of every line. So it carries on off the end of the line it is
+           * on, fades through the turn, and comes back in from the left of the
+           * next one: the eye's own movement, and never actually stationary.
+           */
+          if (f < 0.45) {
+            const run = f / 0.45;
+            left += (here.offsetLeft + here.offsetWidth + 24 - left) * run;
+            visible = 1 - run * 0.85;
+          } else {
+            const run = Math.min(1, (f - 0.55) / 0.45);
+            top = next.offsetTop;
+            width = next.offsetWidth;
+            left = Math.max(0, next.offsetLeft - 24) +
+                   (next.offsetLeft - Math.max(0, next.offsetLeft - 24)) * run;
+            visible = 0.15 + run * 0.85;
+          }
         }
       }
 
-      pill.style.opacity = "1";
+      pill.style.opacity = String(visible);
       pill.style.transform = `translate(${left}px, ${top}px)`;
-      pill.style.width = `${w}px`;
+      pill.style.width = `${width}px`;
       pill.style.height = `${here.offsetHeight}px`;
     };
 
@@ -177,7 +217,7 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
       cancelAnimationFrame(frame);
       pill.style.opacity = "0";
     };
-  }, [spans]);
+  }, [timeline]);
 
   useEffect(() => {
     if (!follow || !current || !body.current) return;
@@ -192,6 +232,14 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
     // Deliberately keyed on the sentence, not the word: scrolling on every
     // word would keep the page in constant motion while reading.
   }, [current, follow]);
+
+
+  // Applied to the element that already exists, not only at creation, so
+  // changing it mid-sentence takes effect on the words being spoken.
+  useEffect(() => {
+    if (audio.current) audio.current.playbackRate = rate;
+    rememberRate(rate);
+  }, [rate]);
 
   function toggle() {
     const el = audio.current;
@@ -271,6 +319,19 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
           <button className="btn btn-primary btn-small" onClick={toggle}>
             {playing ? "Pause" : "Play"}
           </button>
+          <select
+            className="speed-pick"
+            value={rate}
+            onChange={(e) => setRate(Number(e.target.value))}
+            aria-label="Playback speed"
+            title="Playback speed"
+          >
+            {SPEEDS.map((s) => (
+              <option key={s} value={s}>
+                {s}&times;
+              </option>
+            ))}
+          </select>
           <label className="reader-follow">
             <input
               type="checkbox"

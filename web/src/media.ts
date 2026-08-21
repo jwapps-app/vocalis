@@ -29,3 +29,26 @@ export function seekWhenReady(el: HTMLAudioElement, seconds: number): void {
     { once: true }
   );
 }
+
+
+/** Playback speeds offered. Wider than a video player's because a narrated
+ *  book is listened to for hours, and a reader following the text has a
+ *  different comfortable pace from someone only listening. */
+export const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2] as const;
+
+const RATE_KEY = "vocalis:rate";
+
+/** The last speed chosen, or normal. Remembered because picking it again at
+ *  the start of every book would be tedious over a long one. */
+export function storedRate(): number {
+  const saved = Number(localStorage.getItem(RATE_KEY));
+  return SPEEDS.includes(saved as (typeof SPEEDS)[number]) ? saved : 1;
+}
+
+export function rememberRate(rate: number): void {
+  try {
+    localStorage.setItem(RATE_KEY, String(rate));
+  } catch {
+    /* private browsing, or storage full — the speed just will not persist */
+  }
+}

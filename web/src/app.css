@@ -1332,6 +1332,16 @@ code {
 
 .reader-follow input { width: auto; }
 
+/* Compact enough to sit in a toolbar beside the transport buttons; the
+   options are two or four characters, so it need not be wide. */
+.speed-pick {
+  width: auto;
+  flex: none;
+  padding: 0.3rem 0.4rem;
+  font-size: 0.8rem;
+  font-variant-numeric: tabular-nums;
+}
+
 .reader-nav {
   display: flex;
   align-items: center;

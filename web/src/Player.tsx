@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ChapterMark, downloadUrl, getChapterMarks, Job } from "./api";
-import { seekWhenReady } from "./media";
+import { rememberRate, seekWhenReady, SPEEDS, storedRate } from "./media";
 
 /**
  * Listen to a finished book without leaving Vocalis.
@@ -27,6 +27,7 @@ export default function Player({ job, onClose }: { job: Job; onClose: () => void
   const list = useRef<HTMLOListElement | null>(null);
   const [playing, setPlaying] = useState(false);
   const [at, setAt] = useState(0);
+  const [rate, setRate] = useState(storedRate);
   // The M4B carries its own duration; fall back to the stored figure until the
   // metadata loads, so the scrubber is not stuck at 0:00 on first paint.
   const [total, setTotal] = useState(job.audio_seconds ?? 0);
@@ -42,6 +43,7 @@ export default function Player({ job, onClose }: { job: Job; onClose: () => void
   useEffect(() => {
     const el = new Audio(downloadUrl(job));
     el.preload = "metadata";
+    el.playbackRate = rate;
     audio.current = el;
     const onMeta = () => { if (isFinite(el.duration)) setTotal(el.duration); };
     const onTime = () => setAt(el.currentTime);
@@ -57,6 +59,14 @@ export default function Player({ job, onClose }: { job: Job; onClose: () => void
       audio.current = null;
     };
   }, [job.id]);
+
+
+  // Applied to the element that already exists, not only at creation, so
+  // changing it mid-sentence takes effect on the words being spoken.
+  useEffect(() => {
+    if (audio.current) audio.current.playbackRate = rate;
+    rememberRate(rate);
+  }, [rate]);
 
   function toggle() {
     const el = audio.current;
@@ -161,6 +171,20 @@ export default function Player({ job, onClose }: { job: Job; onClose: () => void
           <button type="button" className="btn btn-ghost" onClick={() => skip(30)}>
             +30s
           </button>
+          <select
+            className="speed-pick"
+            value={rate}
+            onChange={(e) => setRate(Number(e.target.value))}
+            aria-label="Playback speed"
+            title="Playback speed"
+          >
+            {SPEEDS.map((s) => (
+              <option key={s} value={s}>
+                {s}&times;
+              </option>
+            ))}
+          </select>
+
           {chapters.length > 0 && (
             <button
               type="button"
