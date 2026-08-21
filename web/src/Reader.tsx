@@ -17,13 +17,7 @@ import { rememberRate, seekWhenReady, SPEEDS, storedRate } from "./media";
 const BAND = 0.22;
 
 type Word = { text: string; start: number; end: number };
-type Span = {
-  start: number;
-  end: number;
-  blockKey: string;
-  chunkIndex: number;
-  words: Word[];
-};
+type Span = { start: number; end: number; blockKey: string; chunkIndex: number };
 
 export default function Reader({ job, onClose }: { job: Job; onClose: () => void }) {
   const audio = useRef<HTMLAudioElement | null>(null);
@@ -68,8 +62,7 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
       ch.blocks.forEach((b, bi) =>
         b.chunks.forEach((c, idx) =>
           out.push({
-            start: c.start, end: c.end, blockKey: `${ci}-${bi}`,
-            chunkIndex: idx, words: c.words ?? [],
+            start: c.start, end: c.end, blockKey: `${ci}-${bi}`, chunkIndex: idx,
           })
         )
       )
@@ -106,15 +99,13 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
 
   /* Every word in the book, in the order it is spoken, with where to find it
      on the page. Flat and ordered so the frame loop can binary search it. */
-  type Stop = { at: number; key: string; chunk: number; index: number };
+  type Stop = { at: number; key: string; index: number };
   const timeline = useMemo<Stop[]>(() => {
     const out: Stop[] = [];
     chapters?.forEach((ch, ci) =>
       ch.blocks.forEach((b, bi) =>
-        b.chunks.forEach((c, chunk) =>
-          c.words?.forEach((w, index) =>
-            out.push({ at: w.start, key: `${ci}-${bi}`, chunk, index })
-          )
+        b.words?.forEach((w, index) =>
+          out.push({ at: w.start, key: `${ci}-${bi}`, index })
         )
       )
     );
@@ -133,8 +124,7 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
 
     const find = (stop: Stop) =>
       pane.querySelector<HTMLElement>(
-        `[data-key="${stop.key}"] [data-chunk="${stop.chunk}"] ` +
-        `.word:nth-of-type(${stop.index + 1})`
+        `[data-key="${stop.key}"] [data-w="${stop.index}"]`
       );
 
     const paint = () => {
@@ -429,62 +419,59 @@ function Block({
     ? block.tag
     : "p") as keyof JSX.IntrinsicElements;
 
-  /* The book's own markup, kept intact.
+  /* The book's own markup, with the spoken words wrapped inside it.
    *
-   * Used whenever the paragraph carries inline formatting — an <em> or a link
-   * could straddle a sentence boundary, and splitting that would either break
-   * the HTML or throw the emphasis away. The book should look like the book,
-   * so the whole paragraph lights up instead: a coarser highlight, never a
-   * mangled page.
+   * One path for every paragraph now. Formatted ones used to be excluded from
+   * word-level following altogether, because a sentence split would cut
+   * through an <em> or a link — and that turned out to describe most of a real
+   * book rather than an awkward minority, so the highlight almost never
+   * appeared. Wrapping words instead of splitting sentences leaves the markup
+   * exactly as it was.
    *
-   * A single-sentence paragraph used to come here too, on the grounds that
-   * there was nothing finer to distinguish. Words are finer, so it does not
-   * any more — only markup sends a paragraph down this path now. */
-  if (block.inline) {
-    const speaking = activeChunk >= 0;
+   * Clicking anywhere in the paragraph jumps to it; the individual words are
+   * targets too, handled by the wrapper below. */
+  if (block.words.length) {
+    // Collected into one object because `Tag` is any of a dozen element types,
+    // and a handler written inline has to satisfy every one of their signatures
+    // at once.
+    const props = {
+      "data-key": blockKey,
+      className: "block",
+      onClick: (e: React.MouseEvent) => {
+        const word = (e.target as HTMLElement).closest<HTMLElement>("[data-w]");
+        const index = word ? Number(word.dataset.w) : -1;
+        if (index >= 0 && block.words[index]) onJump(block.words[index].start);
+      },
+      dangerouslySetInnerHTML: { __html: block.html },
+    } as Record<string, unknown>;
+    return <Tag {...props} />;
+  }
+
+  /* No words: narrated before they were timed, or the page and the recording
+     disagreed. Fall back to lighting the sentence — or the whole paragraph
+     where its markup makes sentences unsplittable. */
+  if (block.inline || block.chunks.length <= 1) {
     return (
       <Tag
         data-key={blockKey}
-        className={speaking ? "block speaking" : "block"}
+        className={activeChunk >= 0 ? "block speaking" : "block"}
         onClick={() => block.chunks[0] && onJump(block.chunks[0].start)}
         dangerouslySetInnerHTML={{ __html: block.html }}
       />
     );
   }
 
-  // Plain prose: split into sentences, and each sentence into its words where
-  // the narrator timed them, so the highlight sits on the word being spoken
-  // rather than the whole sentence. Nothing is lost — there was no inline
-  // markup to keep, and the text shown is the text that was read.
   return (
     <Tag data-key={blockKey} className="block">
       {block.chunks.map((c, i) => (
         <span
           key={i}
           data-chunk={i}
-          className="chunk"
+          className={`chunk${i === activeChunk ? " speaking" : ""}`}
+          onClick={() => onJump(c.start)}
           title="Jump here"
         >
-          {c.words.length ? (
-            c.words.map((w, wi) => (
-              <span
-                key={wi}
-                className="word"
-                onClick={() => onJump(w.start)}
-              >
-                {w.text}{" "}
-              </span>
-            ))
-          ) : (
-            /* Narrated before words were timed: the sentence is the finest
-               thing this book knows about, so light all of it. */
-            <span
-              className={i === activeChunk ? "speaking" : undefined}
-              onClick={() => onJump(c.start)}
-            >
-              {c.text}{" "}
-            </span>
-          )}
+          {c.text}{" "}
         </span>
       ))}
     </Tag>

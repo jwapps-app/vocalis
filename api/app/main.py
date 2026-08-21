@@ -2,6 +2,7 @@ import hmac
 import io
 import json
 import os
+import re
 import shutil
 import uuid
 import zipfile
@@ -667,6 +668,70 @@ def job_chapters(job_id: uuid.UUID):
     return {"chapters": row["marks"] or []}
 
 
+_WORDISH = re.compile(r"[^0-9a-z']+")
+
+
+def _same_word(a: str, b: str) -> bool:
+    return _WORDISH.sub("", a.lower().replace("\u2019", "'")) == \
+           _WORDISH.sub("", b.lower().replace("\u2019", "'"))
+
+
+def _wrap_words(html: str, spoken: list) -> tuple[str, list]:
+    """Wrap each spoken word of a block in a span, leaving its markup alone.
+
+    Splitting a paragraph into sentences was only ever possible where it had no
+    inline formatting, because an <em> or a link can straddle a boundary and
+    cutting there either breaks the HTML or throws the emphasis away. So
+    formatted paragraphs got a whole-block highlight instead — which sounded
+    like a minority case and is not: three quarters of the paragraphs in one
+    real book carry some markup, so the moving highlight almost never appeared.
+
+    Wrapping words rather than splitting sentences avoids the problem entirely.
+    Only text nodes are touched, so the markup tree is untouched and an <em>
+    spanning several words simply contains several wrapped words.
+
+    The text on the page is not always the text that was spoken — citations may
+    have been dropped, ellipses rewritten — so words are matched in sequence
+    and anything unrecognised is left as plain text, unwrapped and never
+    highlighted. If too little matches, the block is returned untouched rather
+    than half-lit.
+    """
+    from bs4 import NavigableString
+
+    soup = BeautifulSoup(f"<div>{html}</div>", "lxml")
+    root = soup.div
+    if root is None or not spoken:
+        return html, []
+
+    matched: list = []
+    index = 0
+    for node in list(root.find_all(string=True)):
+        pieces = re.split(r"(\s+)", str(node))
+        rebuilt: list = []
+        for piece in pieces:
+            if not piece or piece.isspace():
+                rebuilt.append(NavigableString(piece))
+                continue
+            if index < len(spoken) and _same_word(piece, spoken[index]["text"]):
+                span = soup.new_tag("span")
+                span["class"] = "word"
+                span["data-w"] = str(len(matched))
+                span.string = piece
+                rebuilt.append(span)
+                matched.append(spoken[index])
+                index += 1
+            else:
+                rebuilt.append(NavigableString(piece))
+        if rebuilt:
+            node.replace_with(*rebuilt)
+
+    # A block where the page and the recording have drifted apart is better
+    # left plain than lit in the wrong places.
+    if len(matched) < 0.6 * len(spoken):
+        return html, []
+    return root.decode_contents(), matched
+
+
 @app.get("/api/jobs/{job_id}/read")
 def job_read(job_id: uuid.UUID):
     """The book as it was printed, joined to when each part is spoken.
@@ -737,21 +802,36 @@ def job_read(job_id: uuid.UUID):
             # into sentences and lose nothing. Formatting is never sacrificed —
             # only the precision of the highlight, and only for the minority of
             # paragraphs that are both emphasised and multi-sentence.
+            chunks = [
+                {"text": c["text"], "start": c["start"], "end": c["end"]}
+                for c in take
+            ] if len(take) == wanted else []
+
+            # Every word this block speaks, in order, across its sentences.
+            spoken: list = []
+            if chunks:
+                for c in take:
+                    spoken.extend(c.get("words") or [])
+
+            # One path for every paragraph, formatted or not. The words are
+            # wrapped inside the markup rather than the paragraph being split
+            # around it, so italics and links survive and still follow along.
+            html, words = _wrap_words(block["html"], spoken) if spoken \
+                else (block["html"], [])
+
             inner = BeautifulSoup(block["html"], "lxml")
-            has_inline = bool(inner.find(["em", "i", "strong", "b", "a",
-                                          "span", "sup", "sub", "code", "small"]))
             blocks.append({
                 "tag": block["tag"],
-                "html": block["html"],
-                "inline": has_inline,
-                "chunks": [
-                    {"text": c["text"], "start": c["start"], "end": c["end"],
-                     # Present once a narrator that times words has been over
-                     # this book. Absent on older ones, which the reader treats
-                     # as "highlight the sentence" exactly as it always did.
-                     "words": c.get("words") or []}
-                    for c in take
-                ] if len(take) == wanted else [],
+                # Only matters where words could not be wrapped: a formatted
+                # paragraph cannot be cut into sentences, so it lights whole.
+                "inline": bool(inner.find(["em", "i", "strong", "b", "a",
+                                           "span", "sup", "sub", "code", "small"])),
+                "html": html,
+                # Empty on a book narrated before words were timed, or on a
+                # paragraph whose text and recording could not be matched up;
+                # either way the reader falls back to lighting the sentence.
+                "words": words,
+                "chunks": chunks,
             })
         aligned = cursor == len(timed)
         chapters.append({

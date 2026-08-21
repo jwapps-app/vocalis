@@ -195,16 +195,15 @@ export interface ReadChapter {
   aligned: boolean;
   blocks: {
     tag: string;
+    /** The book's own markup, with each spoken word wrapped in a
+     *  `<span class="word" data-w="N">` where N indexes `words`. */
     html: string;
     /** True when the block carries inline markup a sentence split would cut. */
     inline: boolean;
-    chunks: {
-      text: string;
-      start: number;
-      end: number;
-      /** Empty on books narrated before words were timed. */
-      words: { text: string; start: number; end: number }[];
-    }[];
+    /** Every word this block speaks, in order. Empty on a book narrated
+     *  before words were timed, or where page and recording disagreed. */
+    words: { text: string; start: number; end: number }[];
+    chunks: { text: string; start: number; end: number }[];
   }[];
 }
 

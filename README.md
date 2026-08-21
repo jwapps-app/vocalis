@@ -482,9 +482,17 @@ from the voice.
 It runs on the CPU at roughly 25x realtime, so a nine-hour book costs about
 twenty minutes on top of narration. It needs only audio and text, which is why
 a book narrated before any of this existed can be given word timings by
-rebuilding it rather than narrating it again. Paragraphs carrying inline markup
-still highlight a sentence at a time: splitting an `<em>` that straddles a word
-would either break the HTML or lose the emphasis.
+rebuilding it rather than narrating it again.
+
+The words are wrapped *inside* the book's markup rather than the paragraph
+being split around it, so italics and links survive and still follow along.
+Splitting into sentences only worked on unformatted paragraphs, which sounded
+like an acceptable limit and was not: three quarters of the paragraphs in one
+real book carry some markup, so the highlight almost never appeared. Words are
+matched to the page in sequence — the text shown is not always the text spoken,
+since citations may have been dropped — and anything unrecognised is left
+unwrapped rather than lit in the wrong place. Measured at 99% of words on one
+book and 95% on another.
 
 Alignment is *verified*, not assumed. `GET /api/jobs/{id}/read` re-chunks each
 chapter and compares against what was narrated; a chapter whose counts disagree
