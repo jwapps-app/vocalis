@@ -34,12 +34,17 @@ export function seekWhenReady(el: HTMLAudioElement, seconds: number): void {
 /** Playback speeds offered. Wider than a video player's because a narrated
  *  book is listened to for hours, and a reader following the text has a
  *  different comfortable pace from someone only listening. */
-export const SPEEDS = [0.75, 1, 1.25, 1.5, 1.75, 2] as const;
+export const SPEEDS = [0.8, 1, 1.1, 1.25, 1.5, 1.75, 2] as const;
 
 const RATE_KEY = "vocalis:rate";
 
-/** The last speed chosen, or normal. Remembered because picking it again at
- *  the start of every book would be tedious over a long one. */
+/** The last speed chosen, or normal.
+ *
+ *  Remembered because picking it again at the start of every book would be
+ *  tedious over a long one. Checked against the list rather than trusted: a
+ *  speed that was offered once and has since been dropped would otherwise
+ *  stick forever, with no way to select it again and nothing in the control
+ *  showing what was in effect. */
 export function storedRate(): number {
   const saved = Number(localStorage.getItem(RATE_KEY));
   return SPEEDS.includes(saved as (typeof SPEEDS)[number]) ? saved : 1;
