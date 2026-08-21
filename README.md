@@ -494,11 +494,22 @@ since citations may have been dropped — and anything unrecognised is left
 unwrapped rather than lit in the wrong place. Measured at 99% of words on one
 book and 95% on another.
 
-Alignment is *verified*, not assumed. `GET /api/jobs/{id}/read` re-chunks each
-chapter and compares against what was narrated; a chapter whose counts disagree
-is shown as text with no highlighting rather than highlighting the wrong
-sentence. Books narrated before timings were recorded show no **Read along**
-button at all.
+The book is fetched a chapter at a time — `GET /api/jobs/{id}/read` lists the
+chapters, `…/read/{n}` returns one. Sending the whole book was fine while it
+was plain paragraphs and stopped being fine the moment every spoken word was
+wrapped in its own element: one book went from a 0.6 MB response to 8.3 MB and
+asked the browser to lay out eighty-eight thousand elements before showing
+anything, which on a phone never finished. A chapter is a few hundred
+kilobytes at most.
+
+The chapter list comes from the recording's own marks rather than the book's
+contents, so it only offers chapters there is somewhere to jump *to*.
+
+Alignment is *verified*, not assumed. The chapter endpoint re-chunks the text
+and compares against what was narrated; a chapter whose counts disagree is
+shown as text with no highlighting rather than highlighting the wrong words.
+Books narrated before timings were recorded show no **Read along** button at
+all.
 
 If you have such a book, its timings can usually be recovered without narrating
 it again: chunks are joined with a pause of literal digital silence, so the

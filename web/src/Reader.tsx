@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { downloadUrl, getReadable, Job, ReadChapter } from "./api";
+import { ChapterHead, downloadUrl, getReadable, getReadChapter, Job,
+         ReadChapter } from "./api";
 import { rememberRate, seekWhenReady, SPEEDS, storedRate } from "./media";
 
 /**
@@ -16,13 +17,14 @@ import { rememberRate, seekWhenReady, SPEEDS, storedRate } from "./media";
    narrow enough that it never lights half a sentence. */
 const BAND = 0.22;
 
-type Word = { text: string; start: number; end: number };
 type Span = { start: number; end: number; blockKey: string; chunkIndex: number };
 
 export default function Reader({ job, onClose }: { job: Job; onClose: () => void }) {
   const audio = useRef<HTMLAudioElement | null>(null);
   const body = useRef<HTMLDivElement | null>(null);
-  const [chapters, setChapters] = useState<ReadChapter[] | null>(null);
+  const [chapters, setChapters] = useState<ChapterHead[] | null>(null);
+  const [chapter, setChapter] = useState<ReadChapter | null>(null);
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [playing, setPlaying] = useState(false);
   const [at, setAt] = useState(0);
@@ -58,17 +60,13 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
      second — would be the only expensive thing the reader does. */
   const spans = useMemo<Span[]>(() => {
     const out: Span[] = [];
-    chapters?.forEach((ch, ci) =>
-      ch.blocks.forEach((b, bi) =>
-        b.chunks.forEach((c, idx) =>
-          out.push({
-            start: c.start, end: c.end, blockKey: `${ci}-${bi}`, chunkIndex: idx,
-          })
-        )
+    chapter?.blocks.forEach((b, bi) =>
+      b.chunks.forEach((c, idx) =>
+        out.push({ start: c.start, end: c.end, blockKey: `b${bi}`, chunkIndex: idx })
       )
     );
     return out;
-  }, [chapters]);
+  }, [chapter]);
 
   /* Binary search rather than a scan: at four updates a second over thousands
      of chunks, a linear search is wasted work on every tick. */
@@ -102,15 +100,11 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
   type Stop = { at: number; key: string; index: number };
   const timeline = useMemo<Stop[]>(() => {
     const out: Stop[] = [];
-    chapters?.forEach((ch, ci) =>
-      ch.blocks.forEach((b, bi) =>
-        b.words?.forEach((w, index) =>
-          out.push({ at: w.start, key: `${ci}-${bi}`, index })
-        )
-      )
+    chapter?.blocks.forEach((b, bi) =>
+      b.words.forEach((w, index) => out.push({ at: w[0], key: `b${bi}`, index }))
     );
     return out;
-  }, [chapters]);
+  }, [chapter]);
 
   useEffect(() => {
     const pane = body.current;
@@ -255,6 +249,28 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
     return 0;
   }, [chapters, at]);
 
+  /* Fetch whichever chapter the voice is in, and only that one.
+   *
+   * The whole book was too much to hold at once: wrapping every spoken word in
+   * its own element turned one book's page into eighty-eight thousand of them,
+   * which a phone will not lay out. A chapter is a few thousand at most, and
+   * the reader only ever shows one. */
+  useEffect(() => {
+    if (!chapters?.length || chapterIndex < 0) return;
+    if (chapter?.index === chapterIndex) return;
+    let stale = false;
+    setLoading(true);
+    getReadChapter(job.id, chapterIndex).then(
+      (c) => { if (!stale) { setChapter(c); setLoading(false); } },
+      (err) => {
+        if (stale) return;
+        setLoading(false);
+        setError(String(err instanceof Error ? err.message : err));
+      }
+    );
+    return () => { stale = true; };
+  }, [job.id, chapters, chapterIndex, chapter?.index]);
+
   /* Move the page as well as the audio.
    *
    * The whole book is one scroll, so jumping the recording without jumping the
@@ -263,17 +279,17 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
    * runs when Follow is ticked — turning it off should stop the page drifting
    * on its own, not stop it obeying a chapter you chose. */
   function goToChapter(index: number) {
-    const chapter = chapters?.[index];
+    const target = chapters?.[index];
     const el = audio.current;
-    if (!chapter || !el) return;
+    if (!target || !el) return;
     // Unlike clicking a sentence, this does not start playing. Moving about
     // the book is as often reading as it is listening, and a paused reader who
     // picks a chapter has not asked for sound.
-    seekWhenReady(el, chapter.start);
-    setAt(chapter.start);
-    body.current
-      ?.querySelector<HTMLElement>(`[data-chapter="${index}"]`)
-      ?.scrollIntoView({ block: "start", behavior: "smooth" });
+    seekWhenReady(el, target.start);
+    setAt(target.start);
+    // Only one chapter is on the page, so there is nothing to scroll *to* —
+    // the effect above swaps it in, and the reader starts at the top of it.
+    if (body.current) body.current.scrollTop = 0;
   }
 
   // Back within a few seconds of the start means the previous chapter; further
@@ -374,30 +390,35 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
           {/* One highlight for the whole book, moved rather than redrawn. */}
           <div className="reader-cursor" ref={cursor} aria-hidden="true" />
           {!chapters && <p className="hint">Opening the book…</p>}
-          {chapters?.map((ch, ci) => (
-            <section key={ci} className="reader-chapter" data-chapter={ci}>
-              <h3 className="reader-chapter-title" onClick={() => jumpTo(ch.start)}>
-                {ch.title}
+          {chapters && !chapter && (
+            <p className="hint">
+              {loading ? "Fetching this chapter…" : "Nothing to show yet."}
+            </p>
+          )}
+          {chapter && (
+            <section className="reader-chapter">
+              <h3 className="reader-chapter-title" onClick={() => jumpTo(chapter.start)}>
+                {chapter.title}
               </h3>
-              {!ch.aligned && (
+              {!chapter.aligned && (
                 <p className="hint">
                   This chapter's text and recording could not be matched up, so it
                   won't follow along.
                 </p>
               )}
-              {ch.blocks.map((b, bi) => (
+              {chapter.blocks.map((b, bi) => (
                 <Block
                   key={bi}
                   block={b}
-                  blockKey={`${ci}-${bi}`}
+                  blockKey={`b${bi}`}
                   activeChunk={
-                    current?.blockKey === `${ci}-${bi}` ? current.chunkIndex : -1
+                    current?.blockKey === `b${bi}` ? current.chunkIndex : -1
                   }
                   onJump={jumpTo}
                 />
               ))}
             </section>
-          ))}
+          )}
         </div>
       </section>
     </div>
@@ -440,7 +461,7 @@ function Block({
       onClick: (e: React.MouseEvent) => {
         const word = (e.target as HTMLElement).closest<HTMLElement>("[data-w]");
         const index = word ? Number(word.dataset.w) : -1;
-        if (index >= 0 && block.words[index]) onJump(block.words[index].start);
+        if (index >= 0 && block.words[index]) onJump(block.words[index][0]);
       },
       dangerouslySetInnerHTML: { __html: block.html },
     } as Record<string, unknown>;

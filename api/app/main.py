@@ -732,23 +732,8 @@ def _wrap_words(html: str, spoken: list) -> tuple[str, list]:
     return root.decode_contents(), matched
 
 
-@app.get("/api/jobs/{job_id}/read")
-def job_read(job_id: uuid.UUID):
-    """The book as it was printed, joined to when each part is spoken.
-
-    Two halves that only mean something together: the blocks carry the markup
-    the parser used to discard, and the timings recorded during synthesis say
-    when each chunk of text is read aloud. Chunks never cross a paragraph
-    break, so every one belongs inside a single block and the join needs no
-    character offsets.
-
-    Alignment is verified per chapter rather than assumed. Re-chunking here has
-    to reproduce exactly what the narrator chunked; if the counts disagree —
-    a book narrated before a chunking change, say — that chapter is returned
-    with its text and no timings, so it reads correctly and simply does not
-    follow along. Highlighting the wrong sentence would be worse than
-    highlighting none.
-    """
+def _readable(job_id: uuid.UUID):
+    """Everything both read endpoints need: the book, the plan, the timings."""
     with pool.connection() as conn:
         row = conn.execute(
             "SELECT epub_path, chapters, timings, drop_citations, status"
@@ -762,91 +747,129 @@ def job_read(job_id: uuid.UUID):
             "This book was narrated before timings were recorded, so it cannot "
             "follow along. Converting it again would add them.",
         )
-
     try:
         book = parse_epub(DATA_DIR / row["epub_path"])
     except Exception as exc:
         raise HTTPException(400, f"could not read EPUB: {exc}")
 
     plan = {c["index"]: c for c in (row["chapters"] or [])}
-    drop = bool(row["drop_citations"])
-
-    # Timed chunks, grouped by the chapter they belong to.
-    by_chapter: dict[int, list] = {}
-    for chunk in row["timings"].get("chunks", []):
-        by_chapter.setdefault(chunk["chapter"], []).append(chunk)
-    chapter_times = {c["index"]: c for c in row["timings"].get("chapters", [])}
-
     # The narrator numbers chapters by position among those it narrated, not by
     # position in the EPUB, so walk the included ones in the same order.
     included = [i for i, _ in enumerate(book.chapters)
                 if plan.get(i, {}).get("include", True)]
+    return book, plan, included, row
 
-    chapters = []
-    for position, index in enumerate(included):
-        source = book.chapters[index]
-        entry = plan.get(index, {})
-        timed = by_chapter.get(position, [])
-        cursor = 0
-        blocks = []
-        for block in source.blocks:
-            groups = chunk_paragraphs(
-                clean_text(block["text"], drop_citations=drop), MAX_CHUNK_CHARS
-            )
-            wanted = sum(len(g) for g in groups)
-            take = timed[cursor:cursor + wanted]
-            cursor += wanted
-            # Whether the block carries markup that a sentence boundary could
-            # cut through. Where it does, the reader shows the book's own HTML
-            # and lights the whole paragraph; where it does not, it can split
-            # into sentences and lose nothing. Formatting is never sacrificed —
-            # only the precision of the highlight, and only for the minority of
-            # paragraphs that are both emphasised and multi-sentence.
-            chunks = [
-                {"text": c["text"], "start": c["start"], "end": c["end"]}
-                for c in take
-            ] if len(take) == wanted else []
 
-            # Every word this block speaks, in order, across its sentences.
-            spoken: list = []
-            if chunks:
-                for c in take:
-                    spoken.extend(c.get("words") or [])
+@app.get("/api/jobs/{job_id}/read")
+def job_read(job_id: uuid.UUID):
+    """The book's chapters — titles and where each begins. No text.
 
-            # One path for every paragraph, formatted or not. The words are
-            # wrapped inside the markup rather than the paragraph being split
-            # around it, so italics and links survive and still follow along.
-            html, words = _wrap_words(block["html"], spoken) if spoken \
-                else (block["html"], [])
-
-            inner = BeautifulSoup(block["html"], "lxml")
-            blocks.append({
-                "tag": block["tag"],
-                # Only matters where words could not be wrapped: a formatted
-                # paragraph cannot be cut into sentences, so it lights whole.
-                "inline": bool(inner.find(["em", "i", "strong", "b", "a",
-                                           "span", "sup", "sub", "code", "small"])),
-                "html": html,
-                # Empty on a book narrated before words were timed, or on a
-                # paragraph whose text and recording could not be matched up;
-                # either way the reader falls back to lighting the sentence.
-                "words": words,
-                "chunks": chunks,
-            })
-        aligned = cursor == len(timed)
-        chapters.append({
+    The text is fetched a chapter at a time from the endpoint below. Sending
+    the whole book at once was tenable while it was plain paragraphs and grew
+    untenable the moment every spoken word was wrapped in its own element: one
+    real book went from a 0.6 MB response to 8.3 MB, and asked the browser to
+    lay out eighty-eight thousand elements before showing anything. On a phone
+    that never finished — the reader simply sat on "Opening the book".
+    """
+    book, plan, included, row = _readable(job_id)
+    # Driven by the recording's own chapter marks, not by the book's contents.
+    # A chapter with no mark has no place in the audio to jump to, and listing
+    # it with a start of zero is worse than leaving it out: the reader picks
+    # the last chapter that has begun, so a run of zeros at the end swallows
+    # every jump and the text never moves off the final chapter.
+    marks = row["timings"].get("chapters", [])
+    out = []
+    for mark in marks:
+        position = mark["index"]
+        if not 0 <= position < len(included):
+            continue
+        index = included[position]
+        out.append({
             "index": position,
-            "title": entry.get("title") or source.title,
-            "start": chapter_times.get(position, {}).get("start", 0.0),
-            "end": chapter_times.get(position, {}).get("end", 0.0),
-            "blocks": blocks if aligned else [
-                {"tag": b["tag"], "html": b["html"], "chunks": []}
-                for b in source.blocks
-            ],
-            "aligned": aligned,
+            "title": plan.get(index, {}).get("title") or book.chapters[index].title,
+            "start": mark.get("start", 0.0),
+            "end": mark.get("end", 0.0),
+        })
+    return {"chapters": out}
+
+
+@app.get("/api/jobs/{job_id}/read/{position}")
+def job_read_chapter(job_id: uuid.UUID, position: int):
+    """One chapter as it was printed, joined to when each word is spoken.
+
+    Two halves that only mean something together: the blocks carry the markup
+    the parser used to discard, and the timings recorded during synthesis say
+    when each word is read aloud.
+
+    Alignment is verified rather than assumed. Re-chunking here has to
+    reproduce exactly what the narrator chunked; if the counts disagree — a
+    book narrated before a chunking change, say — the chapter is returned with
+    its text and no timings, so it reads correctly and simply does not follow
+    along. Highlighting the wrong words would be worse than highlighting none.
+    """
+    book, plan, included, row = _readable(job_id)
+    if not 0 <= position < len(included):
+        raise HTTPException(404, "no such chapter")
+
+    index = included[position]
+    source = book.chapters[index]
+    drop = bool(row["drop_citations"])
+    timed = [c for c in row["timings"].get("chunks", [])
+             if c["chapter"] == position]
+
+    cursor = 0
+    blocks = []
+    for block in source.blocks:
+        groups = chunk_paragraphs(
+            clean_text(block["text"], drop_citations=drop), MAX_CHUNK_CHARS
+        )
+        wanted = sum(len(g) for g in groups)
+        take = timed[cursor:cursor + wanted]
+        cursor += wanted
+        chunks = [
+            {"text": c["text"], "start": c["start"], "end": c["end"]}
+            for c in take
+        ] if len(take) == wanted else []
+
+        # Every word this block speaks, in order, across its sentences.
+        spoken: list = []
+        for c in take if chunks else ():
+            spoken.extend(c.get("words") or [])
+
+        # One path for every paragraph, formatted or not. The words are
+        # wrapped inside the markup rather than the paragraph being split
+        # around it, so italics and links survive and still follow along.
+        html, words = _wrap_words(block["html"], spoken) if spoken \
+            else (block["html"], [])
+
+        inner = BeautifulSoup(block["html"], "lxml")
+        blocks.append({
+            "tag": block["tag"],
+            # Only matters where words could not be wrapped: a formatted
+            # paragraph cannot be cut into sentences, so it lights whole.
+            "inline": bool(inner.find(["em", "i", "strong", "b", "a",
+                                       "span", "sup", "sub", "code", "small"])),
+            "html": html,
+            # Start and end only — the word itself is already in the markup,
+            # and repeating it here doubled the size of a long chapter.
+            "words": [[w["start"], w["end"]] for w in words],
+            "chunks": chunks,
         })
 
-    return {"chapters": chapters}
+    aligned = cursor == len(timed)
+    marks = {c["index"]: c for c in row["timings"].get("chapters", [])}
+    return {
+        "index": position,
+        "title": plan.get(index, {}).get("title") or source.title,
+        "start": marks.get(position, {}).get("start", 0.0),
+        "end": marks.get(position, {}).get("end", 0.0),
+        "aligned": aligned,
+        "blocks": blocks if aligned else [
+            {"tag": b["tag"], "inline": False, "html": b["html"],
+             "words": [], "chunks": []}
+            for b in source.blocks
+        ],
+    }
 
 
 @app.get("/api/jobs/{job_id}/cover")

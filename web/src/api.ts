@@ -186,12 +186,22 @@ export const getExcerpts = (jobId: string, dropCitations: boolean) =>
 export const getRecorded = (jobId: string) =>
   req<{ indexes: number[] }>(`/api/jobs/${jobId}/recorded`);
 
-/** A chapter as it was printed, joined to when each part is spoken. */
-export interface ReadChapter {
+/** A chapter's name and where it sits in the recording. No text: the book is
+ *  fetched a chapter at a time, because wrapping every spoken word in its own
+ *  element made a whole book far too much to send or lay out at once. */
+export interface ChapterHead {
   index: number;
   title: string;
   start: number;
   end: number;
+}
+
+/** One word, as [start, end] in seconds. An array rather than an object
+ *  because a long chapter has thousands and the keys dwarfed the values. */
+export type WordSpan = [number, number];
+
+/** A chapter as it was printed, joined to when each part is spoken. */
+export interface ReadChapter extends ChapterHead {
   aligned: boolean;
   blocks: {
     tag: string;
@@ -202,13 +212,16 @@ export interface ReadChapter {
     inline: boolean;
     /** Every word this block speaks, in order. Empty on a book narrated
      *  before words were timed, or where page and recording disagreed. */
-    words: { text: string; start: number; end: number }[];
+    words: WordSpan[];
     chunks: { text: string; start: number; end: number }[];
   }[];
 }
 
 export const getReadable = (jobId: string) =>
-  req<{ chapters: ReadChapter[] }>(`/api/jobs/${jobId}/read`);
+  req<{ chapters: ChapterHead[] }>(`/api/jobs/${jobId}/read`);
+
+export const getReadChapter = (jobId: string, position: number) =>
+  req<ReadChapter>(`/api/jobs/${jobId}/read/${position}`);
 
 /** Where a chapter starts and ends in the finished recording. */
 export interface ChapterMark {
