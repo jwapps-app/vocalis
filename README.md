@@ -457,9 +457,23 @@ narrated.
   `<audio>`, so these come from the timings recorded during narration
   (`GET /api/jobs/{id}/chapters`).
 - **Read along** shows the book's own text — italics, headings, block quotes,
-  not a flattened transcript — with the sentence being spoken lit up, and a
-  chapter picker to move around. Clicking any sentence jumps the recording
-  there.
+  not a flattened transcript — with the **word** being spoken lit up, and a
+  chapter picker to move around. Clicking any word jumps the recording there.
+
+Words are found by forced alignment: after a segment is narrated, the audio is
+aligned against the text that produced it, which is a far easier problem than
+recognition because the words are already known. Interpolating across the
+sentence would have been cheaper and is not good enough — Chatterbox inserts
+real pauses of its own, and one measured sentence carried 0.9s and 0.5s of
+silence in the middle of it, so evenly spread timings would sit a second away
+from the voice.
+
+It runs on the CPU at roughly 25x realtime, so a nine-hour book costs about
+twenty minutes on top of narration. It needs only audio and text, which is why
+a book narrated before any of this existed can be given word timings by
+rebuilding it rather than narrating it again. Paragraphs carrying inline markup
+still highlight a sentence at a time: splitting an `<em>` that straddles a word
+would either break the HTML or lose the emphasis.
 
 Alignment is *verified*, not assumed. `GET /api/jobs/{id}/read` re-chunks each
 chapter and compares against what was narrated; a chapter whose counts disagree

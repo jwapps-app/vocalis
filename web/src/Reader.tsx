@@ -10,7 +10,14 @@ import { seekWhenReady } from "./media";
  * captured during synthesis, so following the audio is a lookup rather than a
  * guess.
  */
-type Span = { start: number; end: number; blockKey: string; chunkIndex: number };
+type Word = { text: string; start: number; end: number };
+type Span = {
+  start: number;
+  end: number;
+  blockKey: string;
+  chunkIndex: number;
+  words: Word[];
+};
 
 export default function Reader({ job, onClose }: { job: Job; onClose: () => void }) {
   const audio = useRef<HTMLAudioElement | null>(null);
@@ -52,7 +59,10 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
     chapters?.forEach((ch, ci) =>
       ch.blocks.forEach((b, bi) =>
         b.chunks.forEach((c, idx) =>
-          out.push({ start: c.start, end: c.end, blockKey: `${ci}-${bi}`, chunkIndex: idx })
+          out.push({
+            start: c.start, end: c.end, blockKey: `${ci}-${bi}`,
+            chunkIndex: idx, words: c.words ?? [],
+          })
         )
       )
     );
@@ -72,6 +82,26 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
     return found;
   }, [spans, at]);
 
+  /* The word being spoken, within the sentence already found.
+   *
+   * A separate, tiny search rather than one flat list of every word in the
+   * book: a nine-hour book runs to ninety thousand words, and this runs on
+   * every timeupdate. Searching the twenty-odd words of the current sentence
+   * is work that does not grow with the length of the book.
+   *
+   * -1 when the book has no word timings, or between words — the gaps are
+   * real, since the narrator pauses — and the highlight simply waits where it
+   * is rather than jumping ahead. */
+  const currentWord = useMemo(() => {
+    if (!current || !current.words.length) return -1;
+    let found = -1;
+    for (let i = 0; i < current.words.length; i++) {
+      if (at >= current.words[i].start) found = i;
+      else break;
+    }
+    return found;
+  }, [current, at]);
+
   useEffect(() => {
     if (!follow || !current || !body.current) return;
     // Fall back to the block: a paragraph rendered as the book's own markup
@@ -82,6 +112,8 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
     const node =
       block?.querySelector<HTMLElement>(`[data-chunk="${current.chunkIndex}"]`) ?? block;
     node?.scrollIntoView({ block: "center", behavior: "smooth" });
+    // Deliberately keyed on the sentence, not the word: scrolling on every
+    // word would keep the page in constant motion while reading.
   }, [current, follow]);
 
   function toggle() {
@@ -231,6 +263,9 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
                   activeChunk={
                     current?.blockKey === `${ci}-${bi}` ? current.chunkIndex : -1
                   }
+                  activeWord={
+                    current?.blockKey === `${ci}-${bi}` ? currentWord : -1
+                  }
                   onJump={jumpTo}
                 />
               ))}
@@ -246,11 +281,13 @@ function Block({
   block,
   blockKey,
   activeChunk,
+  activeWord,
   onJump,
 }: {
   block: ReadChapter["blocks"][number];
   blockKey: string;
   activeChunk: number;
+  activeWord: number;
   onJump: (seconds: number) => void;
 }) {
   const Tag = (["h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li"].includes(block.tag)
@@ -259,13 +296,16 @@ function Block({
 
   /* The book's own markup, kept intact.
    *
-   * Used whenever the paragraph carries inline formatting an <em> or a link
-   * could straddle a sentence boundary — splitting that would either break the
-   * HTML or throw the emphasis away, and the book should look like the book.
-   * The whole paragraph lights up instead of one sentence: a coarser highlight,
-   * but never a mangled page. Also used where a paragraph is a single sentence,
-   * since there is nothing finer to distinguish. */
-  if (block.inline || block.chunks.length <= 1) {
+   * Used whenever the paragraph carries inline formatting — an <em> or a link
+   * could straddle a sentence boundary, and splitting that would either break
+   * the HTML or throw the emphasis away. The book should look like the book,
+   * so the whole paragraph lights up instead: a coarser highlight, never a
+   * mangled page.
+   *
+   * A single-sentence paragraph used to come here too, on the grounds that
+   * there was nothing finer to distinguish. Words are finer, so it does not
+   * any more — only markup sends a paragraph down this path now. */
+  if (block.inline) {
     const speaking = activeChunk >= 0;
     return (
       <Tag
@@ -277,19 +317,41 @@ function Block({
     );
   }
 
-  // Plain prose: split into sentences so the highlight can follow precisely.
-  // Nothing is lost here — there was no inline markup to keep.
+  // Plain prose: split into sentences, and each sentence into its words where
+  // the narrator timed them, so the highlight sits on the word being spoken
+  // rather than the whole sentence. Nothing is lost — there was no inline
+  // markup to keep, and the text shown is the text that was read.
   return (
     <Tag data-key={blockKey} className="block">
       {block.chunks.map((c, i) => (
         <span
           key={i}
           data-chunk={i}
-          className={`chunk${i === activeChunk ? " speaking" : ""}`}
-          onClick={() => onJump(c.start)}
+          className="chunk"
           title="Jump here"
         >
-          {c.text}{" "}
+          {c.words.length ? (
+            c.words.map((w, wi) => (
+              <span
+                key={wi}
+                className={
+                  i === activeChunk && wi === activeWord ? "word speaking" : "word"
+                }
+                onClick={() => onJump(w.start)}
+              >
+                {w.text}{" "}
+              </span>
+            ))
+          ) : (
+            /* Narrated before words were timed: the sentence is the finest
+               thing this book knows about, so light all of it. */
+            <span
+              className={i === activeChunk ? "speaking" : undefined}
+              onClick={() => onJump(c.start)}
+            >
+              {c.text}{" "}
+            </span>
+          )}
         </span>
       ))}
     </Tag>

@@ -198,7 +198,13 @@ export interface ReadChapter {
     html: string;
     /** True when the block carries inline markup a sentence split would cut. */
     inline: boolean;
-    chunks: { text: string; start: number; end: number }[];
+    chunks: {
+      text: string;
+      start: number;
+      end: number;
+      /** Empty on books narrated before words were timed. */
+      words: { text: string; start: number; end: number }[];
+    }[];
   }[];
 }
 

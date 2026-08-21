@@ -224,12 +224,21 @@ def fetch_voice(job, work_dir: Path) -> Path | None:
 
 
 
-def _timings_path(work_dir: Path, key: tuple[int, int]) -> Path:
-    position, part = key
-    return work_dir / f"timings_{position:04d}_{part:03d}.json"
+def _timings_path(seg_path: Path) -> Path:
+    """The sidecar for one segment, named after the audio it describes.
+
+    Beside the file rather than keyed by position in the chapter list, because
+    those are different numbering schemes: audio is named by the chapter's
+    original index in the book, which never moves, while position shifts the
+    moment a chapter is deselected. A sidecar keyed by position would then be
+    read for a chapter it was never written for — offsets belonging to a
+    different piece of text, and a reader confidently highlighting the wrong
+    line. Naming it after the audio makes that impossible to express.
+    """
+    return seg_path.with_suffix(".timings.json")
 
 
-def _save_segment_timings(work_dir: Path, key, duration: float, timings) -> None:
+def _save_segment_timings(seg_path: Path, duration: float, timings) -> None:
     """Keep a segment's timings beside its audio.
 
     Cached for the same reason the audio is: a book finished across two runs
@@ -239,11 +248,26 @@ def _save_segment_timings(work_dir: Path, key, duration: float, timings) -> None
     """
     payload = {"duration": duration,
                "chunks": [{"text": t, "start": s, "end": e} for t, s, e in timings]}
-    _timings_path(work_dir, key).write_text(json.dumps(payload))
+    _timings_path(seg_path).write_text(json.dumps(payload))
 
 
-def _load_segment_timings(work_dir: Path, key) -> list | None:
-    path = _timings_path(work_dir, key)
+def _rewrite_segment_words(seg_path: Path, chunks: list) -> None:
+    """Persist newly aligned words back into the segment's sidecar.
+
+    So the alignment is paid for once. Without it a resumed or rebuilt book
+    would re-align every segment it had already done.
+    """
+    path = _timings_path(seg_path)
+    try:
+        payload = json.loads(path.read_text()) if path.is_file() else {}
+        payload["chunks"] = chunks
+        path.write_text(json.dumps(payload))
+    except (OSError, ValueError) as exc:
+        log.warning("Could not save word timings for %s (%s)", path.name, exc)
+
+
+def _load_segment_timings(seg_path: Path) -> list | None:
+    path = _timings_path(seg_path)
     if not path.is_file():
         return None
     try:
@@ -317,6 +341,48 @@ def _derive_segment_timings(path: Path, chunks: list[str] | None) -> list | None
     ]
 
 
+def _add_words(seg_path: Path, chunks: list) -> bool:
+    """Fill in word timings for a segment's chunks, in place.
+
+    Done here rather than during synthesis because everything it needs — the
+    audio and the text that made it — is on disk either way. A book narrated
+    before words existed is therefore no different from one being made now:
+    both are a pass over recordings that already exist, which is why this can
+    be backfilled by rebuilding rather than by narrating again.
+
+    Returns whether anything was added, so the caller knows if the sidecar is
+    worth rewriting. Chunks that already carry words are left alone.
+    """
+    import torchaudio
+    from .align import align_words
+
+    todo = [c for c in chunks if not c.get("words")]
+    if not todo or not seg_path.is_file():
+        return False
+    try:
+        audio, sample_rate = torchaudio.load(str(seg_path))
+    except Exception as exc:                        # noqa: BLE001
+        log.warning("Could not read %s for word timings (%s)", seg_path.name, exc)
+        return False
+
+    added = False
+    for chunk in todo:
+        clip = audio[:, int(chunk["start"] * sample_rate):
+                        int(chunk["end"] * sample_rate)]
+        if clip.shape[1] < sample_rate // 20:       # under 50ms, nothing to align
+            continue
+        words = align_words(clip, sample_rate, chunk["text"])
+        if words:
+            # Stored relative to the segment, like the chunk itself, so the
+            # book-wide offset is applied once in build_timeline.
+            for w in words:
+                w["start"] = round(chunk["start"] + w["start"], 3)
+                w["end"] = round(chunk["start"] + w["end"], 3)
+            chunk["words"] = words
+            added = True
+    return added
+
+
 def build_timeline(chapters, segments, seg_seconds, seg_timings, work_dir) -> dict:
     """Turn per-segment timings into offsets within the finished audiobook.
 
@@ -327,6 +393,7 @@ def build_timeline(chapters, segments, seg_seconds, seg_timings, work_dir) -> di
     """
     book_chunks, book_chapters = [], []
     offset = 0.0
+    aligned = 0
     for position, units in enumerate(segments):
         chapter_start = offset
         for part, (seg_path, seg_chunks) in enumerate(units):
@@ -336,16 +403,27 @@ def build_timeline(chapters, segments, seg_seconds, seg_timings, work_dir) -> di
             # narrated before any timings were kept.
             chunks = (
                 seg_timings.get(key)
-                or _load_segment_timings(work_dir, key)
+                or _load_segment_timings(seg_path)
                 or _derive_segment_timings(seg_path, seg_chunks)
                 or []
             )
+            if _add_words(seg_path, chunks):
+                _rewrite_segment_words(seg_path, chunks)
+                aligned += 1
+                if aligned % 20 == 0:
+                    log.info("Timed the words in %d segments so far", aligned)
             for c in chunks:
                 book_chunks.append({
                     "chapter": position,
                     "text": c["text"],
                     "start": round(offset + c["start"], 3),
                     "end": round(offset + c["end"], 3),
+                    "words": [
+                        {"text": w["text"],
+                         "start": round(offset + w["start"], 3),
+                         "end": round(offset + w["end"], 3)}
+                        for w in c.get("words", ())
+                    ],
                 })
             offset += seg_seconds.get(key, 0.0)
         book_chapters.append({
@@ -354,6 +432,8 @@ def build_timeline(chapters, segments, seg_seconds, seg_timings, work_dir) -> di
             "start": round(chapter_start, 3),
             "end": round(offset, 3),
         })
+    if aligned:
+        log.info("Timed the words in %d segment(s)", aligned)
     return {"chapters": book_chapters, "chunks": book_chunks}
 
 
@@ -504,7 +584,7 @@ def process_job(conn: psycopg.Connection, job) -> None:
             seg_timings[key] = [
                 {"text": t, "start": a, "end": b} for t, a, b in timings
             ]
-            _save_segment_timings(work_dir, key, duration, timings)
+            _save_segment_timings(segments[position][part][0], duration, timings)
             done_chars += sum(len(c) for c in segments[position][part][1] or ())
             # Only announce a chapter once every one of its segments has landed;
             # a half-rendered chapter is not progress the reader can use.

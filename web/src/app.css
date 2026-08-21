@@ -1379,12 +1379,28 @@ code {
 }
 
 .chunk {
-  cursor: pointer;
   border-radius: 3px;
-  transition: background 0.15s;
 }
 
-.chunk:hover { background: var(--surface-sunken); }
+/* One word. The hover target is the word rather than the sentence wherever
+   words are timed, so clicking puts the voice where the eye already is. */
+.word {
+  cursor: pointer;
+  border-radius: 3px;
+  transition: background 0.12s, color 0.12s;
+}
+
+.word:hover { background: var(--surface-sunken); }
+
+/* The word being spoken. Stronger than the sentence wash it replaces: it is
+   small, it moves several times a second, and it has to be findable at a
+   glance without the eye hunting for it. No transition on the way in — a fade
+   that lasts an appreciable fraction of a word reads as lag. */
+.word.speaking {
+  background: var(--brand);
+  color: #fff;
+  transition: none;
+}
 
 /* The sentence being spoken. A wash rather than a block of colour, so the
    words stay the thing being read and not the highlight. */

@@ -32,7 +32,9 @@ from . import config
 # top of, and add the matching entry to REQUIRED_WORKER_REVISION in the API.
 #   1  the original HTTP-transport worker
 #   2  records chunk timings, enabling read-along and chapter marks
-REVISION = 2
+#   3  times individual words, so the reader can follow the voice word
+#      by word rather than sentence by sentence
+REVISION = 3
 
 log = logging.getLogger(__name__)
 
