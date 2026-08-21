@@ -1352,6 +1352,7 @@ code {
 }
 
 .reader-body {
+  position: relative;   /* the moving highlight measures against this */
   overflow-y: auto;
   padding-right: 0.4rem;
   /* Reading measure, not app measure — long lines are tiring to follow. */
@@ -1392,14 +1393,36 @@ code {
 
 .word:hover { background: var(--surface-sunken); }
 
-/* The word being spoken. Stronger than the sentence wash it replaces: it is
-   small, it moves several times a second, and it has to be findable at a
-   glance without the eye hunting for it. No transition on the way in — a fade
-   that lasts an appreciable fraction of a word reads as lag. */
-.word.speaking {
-  background: var(--brand);
-  color: #fff;
-  transition: none;
+/* The voice, as one moving highlight.
+ *
+ * A single element that is repositioned every frame, not a colour applied to
+ * each word in turn. That distinction is the whole point: painting words
+ * individually — even with a gradient sweeping across each one — restarts the
+ * light at every word boundary, and what you see is a wipe that begins again
+ * and again rather than something travelling along the line. Moving one box
+ * has nowhere to restart, so it reads as a glide, and at a boundary it is
+ * genuinely straddling two words and lighting part of each.
+ *
+ * Behind the text rather than over it, so nothing is tinted or dimmed as it
+ * passes. No transition: the frame loop already supplies a position sixty
+ * times a second, and a transition on top would lag behind the voice. */
+.reader-cursor {
+  position: absolute;
+  top: 0;
+  left: 0;
+  z-index: 0;
+  opacity: 0;
+  border-radius: 5px;
+  background: color-mix(in srgb, var(--brand) 30%, transparent);
+  box-shadow: 0 0 10px 3px color-mix(in srgb, var(--brand) 14%, transparent);
+  pointer-events: none;
+  will-change: transform, width;
+}
+
+/* The words sit above the highlight, and are the thing being read. */
+.word {
+  position: relative;
+  z-index: 1;
 }
 
 /* The sentence being spoken. A wash rather than a block of colour, so the

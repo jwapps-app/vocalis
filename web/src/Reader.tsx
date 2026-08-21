@@ -10,6 +10,12 @@ import { seekWhenReady } from "./media";
  * captured during synthesis, so following the audio is a lookup rather than a
  * guess.
  */
+/* How far either side of a word the glow reaches, in seconds. Wide enough
+   that consecutive words overlap — which is what makes it read as one band
+   sliding along the line rather than a box hopping from word to word — and
+   narrow enough that it never lights half a sentence. */
+const BAND = 0.22;
+
 type Word = { text: string; start: number; end: number };
 type Span = {
   start: number;
@@ -82,25 +88,96 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
     return found;
   }, [spans, at]);
 
-  /* The word being spoken, within the sentence already found.
+  /* Light the words continuously, outside React.
    *
-   * A separate, tiny search rather than one flat list of every word in the
-   * book: a nine-hour book runs to ninety thousand words, and this runs on
-   * every timeupdate. Searching the twenty-odd words of the current sentence
-   * is work that does not grow with the length of the book.
+   * Two reasons this is not state. `timeupdate` fires about four times a
+   * second, so anything driven by it steps rather than moves — the very thing
+   * a gliding highlight is meant to avoid. And re-rendering the page sixty
+   * times a second to move one highlight would be absurd for a chapter of
+   * several thousand words.
    *
-   * -1 when the book has no word timings, or between words — the gaps are
-   * real, since the narrator pauses — and the highlight simply waits where it
-   * is rather than jumping ahead. */
-  const currentWord = useMemo(() => {
-    if (!current || !current.words.length) return -1;
-    let found = -1;
-    for (let i = 0; i < current.words.length; i++) {
-      if (at >= current.words[i].start) found = i;
-      else break;
-    }
-    return found;
-  }, [current, at]);
+   * So a frame loop reads the clock itself and writes two custom properties
+   * on the words near the voice. Only the sentence being spoken is touched —
+   * a few dozen elements — and everything else on the page is left alone.
+   */
+  const cursor = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const pane = body.current;
+    const pill = cursor.current;
+    if (!pane || !pill || !spans.length) return;
+    let frame = 0;
+    let painted = -1;
+
+    const paint = () => {
+      frame = requestAnimationFrame(paint);
+      const el = audio.current;
+      if (!el) return;
+      const t = el.currentTime;
+      if (t === painted) return;        // paused, and nothing has moved
+      painted = t;
+
+      let lo = 0, hi = spans.length - 1, span: Span | null = null;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (t < spans[mid].start) hi = mid - 1;
+        else if (t > spans[mid].end) lo = mid + 1;
+        else { span = spans[mid]; break; }
+      }
+      if (!span || !span.words.length) {
+        pill.style.opacity = "0";
+        return;
+      }
+
+      // Which word, and how far through it — the fraction is what makes this
+      // move continuously instead of landing on each word in turn.
+      let i = 0;
+      while (i + 1 < span.words.length && t >= span.words[i + 1].start) i++;
+      const word = span.words[i];
+      const width = word.end - word.start;
+      const through = width > 0.01
+        ? Math.min(1, Math.max(0, (t - word.start) / width))
+        : 1;
+
+      const nodes = pane.querySelectorAll<HTMLElement>(
+        `[data-key="${span.blockKey}"] [data-chunk="${span.chunkIndex}"] .word`
+      );
+      const here = nodes[i];
+      if (!here) { pill.style.opacity = "0"; return; }
+      const next = nodes[i + 1];
+
+      let left = here.offsetLeft;
+      let top = here.offsetTop;
+      let w = here.offsetWidth;
+
+      // Slide towards the next word as this one is finished, so the highlight
+      // is genuinely between the two at a boundary and covers a little of
+      // each. Only along a line: lerping to a word on the next line would send
+      // it flying diagonally across the paragraph, so there it simply waits
+      // and steps over once the voice has actually arrived.
+      if (next) {
+        if (next.offsetTop === top) {
+          left += (next.offsetLeft - left) * through;
+          w += (next.offsetWidth - w) * through;
+        } else if (through > 0.92) {
+          left = next.offsetLeft;
+          top = next.offsetTop;
+          w = next.offsetWidth;
+        }
+      }
+
+      pill.style.opacity = "1";
+      pill.style.transform = `translate(${left}px, ${top}px)`;
+      pill.style.width = `${w}px`;
+      pill.style.height = `${here.offsetHeight}px`;
+    };
+
+    frame = requestAnimationFrame(paint);
+    return () => {
+      cancelAnimationFrame(frame);
+      pill.style.opacity = "0";
+    };
+  }, [spans]);
 
   useEffect(() => {
     if (!follow || !current || !body.current) return;
@@ -243,6 +320,8 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
         )}
 
         <div className="reader-body" ref={body}>
+          {/* One highlight for the whole book, moved rather than redrawn. */}
+          <div className="reader-cursor" ref={cursor} aria-hidden="true" />
           {!chapters && <p className="hint">Opening the book…</p>}
           {chapters?.map((ch, ci) => (
             <section key={ci} className="reader-chapter" data-chapter={ci}>
@@ -263,9 +342,6 @@ export default function Reader({ job, onClose }: { job: Job; onClose: () => void
                   activeChunk={
                     current?.blockKey === `${ci}-${bi}` ? current.chunkIndex : -1
                   }
-                  activeWord={
-                    current?.blockKey === `${ci}-${bi}` ? currentWord : -1
-                  }
                   onJump={jumpTo}
                 />
               ))}
@@ -281,13 +357,11 @@ function Block({
   block,
   blockKey,
   activeChunk,
-  activeWord,
   onJump,
 }: {
   block: ReadChapter["blocks"][number];
   blockKey: string;
   activeChunk: number;
-  activeWord: number;
   onJump: (seconds: number) => void;
 }) {
   const Tag = (["h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "li"].includes(block.tag)
@@ -334,9 +408,7 @@ function Block({
             c.words.map((w, wi) => (
               <span
                 key={wi}
-                className={
-                  i === activeChunk && wi === activeWord ? "word speaking" : "word"
-                }
+                className="word"
                 onClick={() => onJump(w.start)}
               >
                 {w.text}{" "}
