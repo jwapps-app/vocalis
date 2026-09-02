@@ -4,8 +4,10 @@ import json
 import os
 import re
 import shutil
+import threading
 import uuid
 import zipfile
+from collections import OrderedDict
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -23,12 +25,15 @@ from .db import pool
 from .narrators import list_narrators, resolve
 from .security import (
     SESSION_DAYS,
+    enrolment_valid,
     has_username,
     is_configured,
     login_wait,
+    mint_enrolment,
     mint_session,
     note_login_failure,
     note_login_success,
+    revoke_sessions,
     session_valid,
     set_credentials,
     set_username,
@@ -95,6 +100,21 @@ MIGRATIONS = [
     # Nullable on purpose: an instance set up before usernames existed keeps
     # working on its password, and is asked to choose a name once.
     "ALTER TABLE instance ADD COLUMN IF NOT EXISTS username TEXT",
+    # Bumped by signing out, and carried in every session token, so that
+    # signing out actually invalidates the ones already issued.
+    "ALTER TABLE instance ADD COLUMN IF NOT EXISTS session_epoch INT NOT NULL DEFAULT 1",
+    # A short-lived code for fetching the installer, so the worker's own token
+    # never has to travel in a URL.
+    "ALTER TABLE instance ADD COLUMN IF NOT EXISTS enrol_code TEXT",
+    "ALTER TABLE instance ADD COLUMN IF NOT EXISTS enrol_expires TIMESTAMPTZ",
+    # Sizes recorded when files are written, so listing the library does not
+    # walk the filesystem once per book on every poll.
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS output_bytes BIGINT",
+    "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS upload_bytes BIGINT",
+    # parent_id carries a self-referencing foreign key with ON DELETE CASCADE
+    # and is queried directly when a draft's auditions are dropped. Postgres
+    # does not index a foreign key for you, so both were sequential scans.
+    "CREATE INDEX IF NOT EXISTS jobs_parent_idx ON jobs (parent_id)",
 ]
 
 
@@ -125,6 +145,22 @@ PUBLIC_PATHS = {
 }
 
 
+# What the narrator itself calls. Its token opens these and nothing else.
+#
+# It used to open everything, which made it an administrator's credential
+# rather than a narrator's: presenting it as ?key=… deleted a book. And since
+# it is handed out inside a URL, a single line in an access log was enough.
+_WORKER_PATHS = re.compile(
+    r"^/api/(?:narrators$"
+    r"|narrators/[^/]+/clip$"
+    r"|jobs/[^/]+/(?:epub|voice|output)$)"
+)
+
+# Fetching the installer, which `curl | sh` can only authenticate from the URL.
+# Reachable with a short-lived enrolment code, never with the worker token.
+_ENROL_PATHS = ("/api/worker/install", "/api/worker/bundle")
+
+
 @app.middleware("http")
 async def authenticate(request: Request, call_next):
     """Require a session on every route except the handful named above.
@@ -143,12 +179,16 @@ async def authenticate(request: Request, call_next):
     if not is_configured():
         return await call_next(request)
 
-    # Header for the running narrator; query parameter for enrolling one.
-    # `curl … | sh` cannot hold a session and cannot be given a header by the
-    # person pasting it, so the command shown on the setup page — a page only
-    # reachable once logged in — carries the key in its URL instead.
-    presented = request.headers.get("x-vocalis-worker") or request.query_params.get("key")
-    if presented and hmac.compare_digest(presented, worker_token()):
+    # The narrator's own token, as a header, for the handful of paths it uses.
+    presented = request.headers.get("x-vocalis-worker")
+    if (presented and _WORKER_PATHS.match(path)
+            and hmac.compare_digest(presented, worker_token())):
+        return await call_next(request)
+
+    # An enrolment code, in the URL, for fetching the installer — the one
+    # request that cannot carry a header, because it is what `curl | sh` runs.
+    key = request.query_params.get("key")
+    if key and path in _ENROL_PATHS and enrolment_valid(key):
         return await call_next(request)
 
     session = request.cookies.get(SESSION_COOKIE)
@@ -295,6 +335,13 @@ def auth_set_username(username: str = Body(..., embed=True)):
 
 @app.post("/api/auth/logout")
 def auth_logout():
+    """Sign out — properly.
+
+    Clearing the cookie only asks this browser to forget it. The token stays
+    valid for the rest of its month wherever else it was copied, so anything
+    already holding one stayed signed in. Revoking the generation ends it.
+    """
+    revoke_sessions()
     response = JSONResponse({"ok": True})
     response.delete_cookie(SESSION_COOKIE, path="/")
     return response
@@ -349,10 +396,36 @@ def narrator_preview(narrator_id: str):
 # ---------------------------------------------------------------- jobs
 
 
-def _save_upload(upload: UploadFile, dest: Path) -> None:
+# A voice clip is meant to be five to thirty seconds. Anything past this is
+# either a mistake or an attempt to fill the disk, and both are better refused
+# than written.
+MAX_VOICE_BYTES = 25 * 1024 * 1024
+
+
+def _save_upload(upload: UploadFile, dest: Path, limit: int | None = None) -> int:
+    """Stream an upload to `dest`, and return how many bytes it held.
+
+    Written under a temporary name and renamed into place, so an interrupted
+    transfer cannot leave a truncated file sitting at the real one. That
+    matters most for the finished audiobook: it arrives over a network from
+    another machine, and half of one is indistinguishable from all of one by
+    name alone.
+    """
     dest.parent.mkdir(parents=True, exist_ok=True)
-    with dest.open("wb") as f:
-        shutil.copyfileobj(upload.file, f)
+    partial = dest.with_name(dest.name + ".part")
+    written = 0
+    try:
+        with partial.open("wb") as f:
+            while chunk := upload.file.read(1024 * 1024):
+                written += len(chunk)
+                if limit is not None and written > limit:
+                    raise HTTPException(413, "that file is too large")
+                f.write(chunk)
+        os.replace(partial, dest)
+    except BaseException:
+        partial.unlink(missing_ok=True)
+        raise
+    return written
 
 
 def _own_upload(job_id, rel: str) -> str:
@@ -387,6 +460,39 @@ COVER_TYPES = {
 # expanded. ebooklib reads items into memory, so the ceiling is the API
 # container's RAM.
 MAX_EPUB_UNPACKED = 400 * 1024 * 1024
+
+
+# Parsed books, keyed by the file and how it looked when it was read.
+#
+# The same EPUB was parsed again for every request that touched it — the review
+# screen's citations and excerpts, and, since the reader began fetching a
+# chapter at a time, once per chapter. Measured at 129–144 ms a time, so
+# reading a 43-chapter book spent about six seconds re-reading a file that had
+# not changed. Keyed on size and mtime so a re-uploaded book is never served
+# from a stale parse.
+_PARSE_CACHE: "OrderedDict[tuple, object]" = OrderedDict()
+_PARSE_CACHE_MAX = 4
+_parse_lock = threading.Lock()
+
+
+def parse_epub_cached(path: Path):
+    try:
+        stat = path.stat()
+    except OSError:
+        return parse_epub(path)          # let the caller see the real error
+    key = (str(path), stat.st_mtime_ns, stat.st_size)
+    with _parse_lock:
+        hit = _PARSE_CACHE.get(key)
+        if hit is not None:
+            _PARSE_CACHE.move_to_end(key)
+            return hit
+    book = parse_epub(path)
+    with _parse_lock:
+        _PARSE_CACHE[key] = book
+        _PARSE_CACHE.move_to_end(key)
+        while len(_PARSE_CACHE) > _PARSE_CACHE_MAX:
+            _PARSE_CACHE.popitem(last=False)
+    return book
 
 
 def _reject_zip_bomb(path: Path) -> None:
@@ -493,7 +599,7 @@ def job_citations(job_id: uuid.UUID):
         raise HTTPException(404, "job not found")
 
     try:
-        book = parse_epub(DATA_DIR / row["epub_path"])
+        book = parse_epub_cached(DATA_DIR / row["epub_path"])
     except Exception as exc:
         raise HTTPException(400, f"could not read EPUB: {exc}")
 
@@ -542,7 +648,7 @@ def job_excerpts(job_id: uuid.UUID, drop_citations: bool = False):
         raise HTTPException(404, "job not found")
 
     try:
-        book = parse_epub(DATA_DIR / row["epub_path"])
+        book = parse_epub_cached(DATA_DIR / row["epub_path"])
     except Exception as exc:
         raise HTTPException(400, f"could not read EPUB: {exc}")
 
@@ -639,13 +745,22 @@ def upload_output(job_id: uuid.UUID, file: UploadFile = File(...)):
     """
     with pool.connection() as conn:
         row = conn.execute("SELECT mode FROM jobs WHERE id = %s", (job_id,)).fetchone()
-        if row is None:
-            raise HTTPException(404, "job not found")
+    if row is None:
+        raise HTTPException(404, "job not found")
 
-        name = "sample.wav" if row["mode"] == "sample" else "book.m4b"
-        rel = f"output/{job_id}/{name}"
-        _save_upload(file, DATA_DIR / rel)
-        conn.execute("UPDATE jobs SET output_path = %s WHERE id = %s", (rel, job_id))
+    name = "sample.wav" if row["mode"] == "sample" else "book.m4b"
+    rel = f"output/{job_id}/{name}"
+    # Deliberately outside the connection block. A finished audiobook is
+    # hundreds of megabytes arriving over a network, and holding one of the
+    # five pooled connections open for the length of that transfer would stall
+    # every other request behind it.
+    written = _save_upload(file, DATA_DIR / rel)
+
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE jobs SET output_path = %s, output_bytes = %s WHERE id = %s",
+            (rel, written, job_id),
+        )
     return {"output_path": rel}
 
 
@@ -748,7 +863,7 @@ def _readable(job_id: uuid.UUID):
             "follow along. Converting it again would add them.",
         )
     try:
-        book = parse_epub(DATA_DIR / row["epub_path"])
+        book = parse_epub_cached(DATA_DIR / row["epub_path"])
     except Exception as exc:
         raise HTTPException(400, f"could not read EPUB: {exc}")
 
@@ -1028,9 +1143,19 @@ def resume(job_id: uuid.UUID):
 @app.post("/api/jobs/{job_id}/voice", status_code=201)
 def upload_voice(job_id: uuid.UUID, voice: UploadFile = File(...)):
     """Attach a custom reference clip to a draft; returns its stored path."""
+    with pool.connection() as conn:
+        row = conn.execute("SELECT id FROM jobs WHERE id = %s", (job_id,)).fetchone()
+    if row is None:
+        # Without this, a clip could be written into a directory named after
+        # any UUID at all, for a book that does not exist and never will.
+        raise HTTPException(404, "job not found")
     ext = Path(voice.filename or "clip.wav").suffix or ".wav"
     rel = f"uploads/{job_id}/voice{ext}"
-    _save_upload(voice, DATA_DIR / rel)
+    _save_upload(voice, DATA_DIR / rel, limit=MAX_VOICE_BYTES)
+    with pool.connection() as conn:
+        # The recorded upload size is now short by this clip. Clearing it has
+        # the next library listing measure the folder once and keep the answer.
+        conn.execute("UPDATE jobs SET upload_bytes = NULL WHERE id = %s", (job_id,))
     return {"voice_ref_path": rel}
 
 
@@ -1069,6 +1194,30 @@ def _dir_bytes(directory: Path) -> int:
     return sum(f.stat().st_size for f in directory.rglob("*") if f.is_file())
 
 
+def _sizes(conn, row) -> dict[str, int]:
+    """What this server stores for a book, from the numbers it recorded.
+
+    Measured when the files are written rather than counted on demand. The
+    library list is polled every couple of seconds, and walking two directories
+    per book meant two hundred directory scans a poll on a hundred-book shelf —
+    cheap on an SSD, considerably less so on the network storage a NAS install
+    is likely to be using.
+
+    Books written before the sizes were recorded are measured once, here, and
+    the answer kept, so the walk happens at most once per book ever.
+    """
+    output, upload = row.get("output_bytes"), row.get("upload_bytes")
+    if output is None or upload is None:
+        measured = _disk_breakdown(row["id"])
+        output = measured["output_bytes"] if output is None else output
+        upload = measured["upload_bytes"] if upload is None else upload
+        conn.execute(
+            "UPDATE jobs SET output_bytes = %s, upload_bytes = %s WHERE id = %s",
+            (output, upload, row["id"]),
+        )
+    return {"output_bytes": output, "disk_bytes": output + upload}
+
+
 def _disk_breakdown(job_id) -> dict[str, int]:
     """What this server stores for a job: the audiobook and the source EPUB.
 
@@ -1082,6 +1231,7 @@ def _disk_breakdown(job_id) -> dict[str, int]:
     upload = _dir_bytes(DATA_DIR / "uploads" / str(job_id))
     return {
         "output_bytes": output,
+        "upload_bytes": upload,
         "disk_bytes": output + upload,
     }
 
@@ -1094,11 +1244,12 @@ def _disk_bytes(job_id) -> int:
 def list_jobs():
     with pool.connection() as conn:
         rows = conn.execute(
-            f"SELECT {JOB_COLUMNS} FROM jobs WHERE mode = 'full'"
-            " ORDER BY created_at DESC LIMIT 100"
+            f"SELECT {JOB_COLUMNS}, output_bytes, upload_bytes FROM jobs"
+            " WHERE mode = 'full' ORDER BY created_at DESC LIMIT 100"
         ).fetchall()
-    for row in rows:
-        row.update(_disk_breakdown(row["id"]))
+        for row in rows:
+            row.update(_sizes(conn, row))
+            row.pop("upload_bytes", None)
     return rows
 
 
@@ -1208,9 +1359,13 @@ def worker_status(request: Request):
         # Quoted: zsh is the default shell on macOS and treats '?' as a glob,
         # so an unquoted URL with a query string fails with "no matches found"
         # before curl is ever reached.
+        # A fresh enrolment code each time this page is opened, good for half
+        # an hour. Not the worker token: that one authenticates the narrator
+        # itself and must never travel in a URL, where every proxy in the path
+        # writes it to a log.
         "install_command": (
             f'curl -fsSL "{_public_api_url(request)}'
-            f'/api/worker/install?key={worker_token()}" | sh'
+            f'/api/worker/install?key={mint_enrolment()}" | sh'
         ),
     }
 
@@ -1232,7 +1387,9 @@ def worker_install_script(request: Request):
     script cannot disagree with the page it was copied from.
     """
     api = _public_api_url(request)
-    key = worker_token()
+    # Whatever authenticated this request is what the script uses for the
+    # bundle — the enrolment code it was given, not a longer-lived secret.
+    key = request.query_params.get("key", "")
     script = f"""#!/bin/sh
 # Vocalis narrator installer. Fetches the worker bundle from {api} and runs it.
 set -eu

@@ -16,7 +16,9 @@ Two kinds of caller, and they cannot share a mechanism:
 import hmac
 import os
 import secrets
+import threading
 import time
+from datetime import datetime, timezone
 from typing import Annotated
 
 import bcrypt
@@ -34,11 +36,34 @@ SESSION_DAYS = 30
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-_COLUMNS = "username, password_hash, secret_key, worker_token"
+_COLUMNS = ("username, password_hash, secret_key, worker_token,"
+            " session_epoch, enrol_code, enrol_expires")
+
+# The settings row, kept in memory between requests.
+#
+# It was being read twice on every single request — once to ask whether a
+# password exists, once to get the key a session is signed with — so the
+# cheapest endpoint in the app cost three round trips to serve one row of
+# actual data, on a pool of five connections, against a UI that polls. The row
+# changes when credentials are set or a session is revoked, and at no other
+# time.
+#
+# Writes here clear it directly; the short expiry is only so a second API
+# process, which cannot be told, converges quickly.
+_CACHE_SECONDS = 5.0
+_cached: dict | None = None
+_cached_at = 0.0
+_lock = threading.Lock()
 
 
-def _instance() -> dict:
-    """The single settings row, with its secrets generated on first use."""
+def _forget() -> None:
+    """Drop the cached row after a write."""
+    global _cached
+    with _lock:
+        _cached = None
+
+
+def _load() -> dict:
     with pool.connection() as conn:
         row = conn.execute(f"SELECT {_COLUMNS} FROM instance WHERE id").fetchone()
         if row is None:
@@ -51,10 +76,23 @@ def _instance() -> dict:
                 """,
                 (secrets.token_hex(32), secrets.token_hex(32)),
             ).fetchone()
-            if row is None:  # another worker inserted it first
+            if row is None:  # another process inserted it first
                 row = conn.execute(
                     f"SELECT {_COLUMNS} FROM instance WHERE id"
                 ).fetchone()
+    return row
+
+
+def _instance() -> dict:
+    """The single settings row, with its secrets generated on first use."""
+    global _cached, _cached_at
+    now = time.monotonic()
+    with _lock:
+        if _cached is not None and now - _cached_at < _CACHE_SECONDS:
+            return _cached
+    row = _load()
+    with _lock:
+        _cached, _cached_at = row, time.monotonic()
     return row
 
 
@@ -96,6 +134,7 @@ def set_credentials(username: str, password: str) -> None:
             "UPDATE instance SET username = %s, password_hash = %s WHERE id",
             (username, digest),
         )
+    _forget()
 
 
 def set_username(username: str) -> None:
@@ -103,6 +142,7 @@ def set_username(username: str) -> None:
     username = _check_username(username)
     with pool.connection() as conn:
         conn.execute("UPDATE instance SET username = %s WHERE id", (username,))
+    _forget()
 
 
 def verify_credentials(username: str, password: str) -> bool:
@@ -184,21 +224,85 @@ def note_login_success() -> None:
     _failures, _retry_at = 0, 0.0
 
 
+def _epoch() -> int:
+    return _instance()["session_epoch"] or 1
+
+
 def mint_session() -> str:
-    payload = {"sub": "owner", "exp": int(time.time()) + SESSION_DAYS * 86400}
+    """A session, stamped with the generation it belongs to."""
+    payload = {
+        "sub": "owner",
+        "gen": _epoch(),
+        "exp": int(time.time()) + SESSION_DAYS * 86400,
+    }
     return jwt.encode(payload, _instance()["secret_key"], algorithm=ALGORITHM)
+
+
+def session_valid(token: str) -> bool:
+    """Whether a session is signed, unexpired, and not signed out.
+
+    The generation is what makes signing out mean something. A JWT is valid
+    until it expires and cannot be withdrawn, so deleting the cookie only asked
+    the browser to forget it — anyone who had already copied it stayed signed
+    in for the rest of the month. Bumping the generation invalidates every
+    token issued before it, which is the behaviour "Sign out" claims.
+    """
+    try:
+        claims = jwt.decode(token, _instance()["secret_key"], algorithms=[ALGORITHM])
+    except jwt.PyJWTError:
+        return False
+    return claims.get("gen") == _epoch()
+
+
+def revoke_sessions() -> None:
+    """Sign out. One account, so this ends every session there is."""
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE instance SET session_epoch = COALESCE(session_epoch, 1) + 1"
+            " WHERE id"
+        )
+    _forget()
 
 
 def worker_token() -> str:
     return _instance()["worker_token"]
 
 
-def session_valid(token: str) -> bool:
-    try:
-        jwt.decode(token, _instance()["secret_key"], algorithms=[ALGORITHM])
-        return True
-    except jwt.PyJWTError:
+# --- enrolling a narrator -------------------------------------------------
+#
+# The install command is fetched by `curl … | sh`, which has no session and no
+# way to be given a header, so its credential has to sit in the URL — where it
+# is written to the access log of every proxy between here and the caller, and
+# into shell history.
+#
+# That is survivable for a code which only fetches the installer and expires,
+# and was not for the worker token: the same value authenticated every endpoint
+# in the API, so a line in a log file was enough to delete the whole library.
+# They are now different secrets with different reach.
+ENROLMENT_MINUTES = 30
+
+
+def mint_enrolment() -> str:
+    """A short-lived code that can fetch the installer and nothing else."""
+    code = secrets.token_hex(16)
+    with pool.connection() as conn:
+        conn.execute(
+            "UPDATE instance SET enrol_code = %s,"
+            " enrol_expires = now() + %s * interval '1 minute' WHERE id",
+            (code, ENROLMENT_MINUTES),
+        )
+    _forget()
+    return code
+
+
+def enrolment_valid(code: str) -> bool:
+    row = _instance()
+    stored, expires = row["enrol_code"], row["enrol_expires"]
+    if not stored or not expires:
         return False
+    if expires < datetime.now(timezone.utc):
+        return False
+    return hmac.compare_digest(code, stored)
 
 
 def require_auth(

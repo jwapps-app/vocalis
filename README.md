@@ -189,9 +189,15 @@ putting it anywhere else.
   it beyond your own network. The Setup page explains this where it bites.
 - **The database port** is on loopback unless you set `DB_BIND`. Once you do,
   `POSTGRES_PASSWORD` is the only thing protecting it, so generate a real one.
-- **The enrolment key** in the install command is the worker token. Anyone who
-  has it can register a narrator and pull books; treat the command as a secret
-  and do not paste it into an issue.
+- **The enrolment code** in the install command is not the narrator's token.
+  It expires after thirty minutes and opens only the installer and the bundle,
+  because a credential that travels in a URL is written to the access log of
+  every proxy it passes. The narrator's own token is separate, sent as a
+  header, and opens only the handful of endpoints the narrator uses — not the
+  whole API, which is what made a line in a log file enough to delete a book.
+- **Signing out invalidates the session**, rather than only clearing the
+  cookie. A token cannot be withdrawn once issued, so sessions carry a
+  generation that signing out increments.
 - **EPUB markup is sanitized** before the reader renders it — tags reduced to a
   known-safe set, every attribute but `href`/`title` dropped, and non-http(s)
   URLs stripped — because an EPUB is an untrusted document that arrives as HTML.

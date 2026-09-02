@@ -2,6 +2,7 @@
 
 import posixpath
 import re
+from html import escape
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -168,8 +169,17 @@ def _item_text(item) -> tuple[str | None, str, list[dict]]:
 
     text = "\n\n".join(b["text"] for b in blocks)
     if not text:
+        # A chapter with no paragraph, heading or list at all — just words in
+        # the body. There is no element to sanitize, so this is plain text and
+        # has to be escaped before it can be called markup.
+        #
+        # It was not, and get_text() decodes entities: a book whose prose
+        # merely *mentions* "&lt;img onerror=…&gt;" arrived at the reader as a
+        # live tag, injected straight into the page. The rest of the parser
+        # whitelists tags and strips every attribute; this one path skipped all
+        # of it.
         text = _block_text(body)
-        blocks = [{"tag": "p", "html": text, "text": text}] if text else []
+        blocks = [{"tag": "p", "html": escape(text), "text": text}] if text else []
     return title, text, blocks
 
 
