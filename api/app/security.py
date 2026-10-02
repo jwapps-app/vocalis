@@ -18,7 +18,7 @@ import os
 import secrets
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Annotated
 
 import bcrypt
@@ -37,7 +37,8 @@ bearer_scheme = HTTPBearer(auto_error=False)
 
 
 _COLUMNS = ("username, password_hash, secret_key, worker_token,"
-            " session_epoch, enrol_code, enrol_expires")
+            " session_epoch, enrol_code, enrol_expires,"
+            " enrol_prev_code, enrol_prev_expires")
 
 # The settings row, kept in memory between requests.
 #
@@ -281,28 +282,73 @@ def worker_token() -> str:
 # They are now different secrets with different reach.
 ENROLMENT_MINUTES = 30
 
+# A code is handed out unchanged until it has less than this left to live, so
+# the command on the Setup page is stable while someone copies and runs it.
+_ROTATE_WITHIN_MINUTES = 10
 
-def mint_enrolment() -> str:
-    """A short-lived code that can fetch the installer and nothing else."""
-    code = secrets.token_hex(16)
+
+def current_enrolment() -> str:
+    """The code to put in the install command — the same one, for a while.
+
+    This used to mint a fresh code on every call. The call is /api/worker,
+    which the app polls every five seconds — twice over with the Setup page
+    open — so the command you copied was replaced within seconds and failed
+    with a 401 when you ran it. Each mint also emptied the settings cache,
+    which put the database round trips the cache exists to avoid back on
+    every request.
+
+    Now a code is reused until it has under ten minutes left, then rotated, and
+    the one it replaces stays valid until its own expiry. Any code that has been
+    on screen is therefore good for at least ten more minutes.
+
+    Rotation is one conditional UPDATE, so two polls arriving together cannot
+    both rotate and strand a code one of them just displayed. It only runs near
+    expiry: the rest of the time the cached settings row already holds a code
+    with enough life left, and a poll costs no query at all.
+    """
+    row = _instance()
+    if (row["enrol_code"] and row["enrol_expires"]
+            and row["enrol_expires"] - datetime.now(timezone.utc)
+            > timedelta(minutes=_ROTATE_WITHIN_MINUTES)):
+        return row["enrol_code"]
+
     with pool.connection() as conn:
-        conn.execute(
-            "UPDATE instance SET enrol_code = %s,"
-            " enrol_expires = now() + %s * interval '1 minute' WHERE id",
-            (code, ENROLMENT_MINUTES),
-        )
-    _forget()
+        rotated = conn.execute(
+            """
+            UPDATE instance SET
+                enrol_prev_code = enrol_code,
+                enrol_prev_expires = enrol_expires,
+                enrol_code = %s,
+                enrol_expires = now() + %s * interval '1 minute'
+            WHERE id AND (enrol_code IS NULL
+                          OR enrol_expires < now() + %s * interval '1 minute')
+            RETURNING enrol_code
+            """,
+            (secrets.token_hex(16), ENROLMENT_MINUTES, _ROTATE_WITHIN_MINUTES),
+        ).fetchone()
+        if rotated:
+            code = rotated["enrol_code"]
+        else:
+            code = conn.execute(
+                "SELECT enrol_code FROM instance WHERE id"
+            ).fetchone()["enrol_code"]
+    if rotated:
+        _forget()   # only when something changed — not on every poll
     return code
 
 
 def enrolment_valid(code: str) -> bool:
+    """Whether `code` is the current enrolment code or the one before it,
+    and has not expired. Both are compared, whichever matches, so the time
+    taken does not reveal which slot a guess was closest to."""
     row = _instance()
-    stored, expires = row["enrol_code"], row["enrol_expires"]
-    if not stored or not expires:
-        return False
-    if expires < datetime.now(timezone.utc):
-        return False
-    return hmac.compare_digest(code, stored)
+    now = datetime.now(timezone.utc)
+    ok = False
+    for stored, expires in ((row["enrol_code"], row["enrol_expires"]),
+                            (row["enrol_prev_code"], row["enrol_prev_expires"])):
+        if stored and expires and expires > now:
+            ok = hmac.compare_digest(code, stored) or ok
+    return ok
 
 
 def require_auth(

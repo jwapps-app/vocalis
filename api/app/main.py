@@ -29,7 +29,7 @@ from .security import (
     has_username,
     is_configured,
     login_wait,
-    mint_enrolment,
+    current_enrolment,
     mint_session,
     note_login_failure,
     note_login_success,
@@ -107,6 +107,10 @@ MIGRATIONS = [
     # never has to travel in a URL.
     "ALTER TABLE instance ADD COLUMN IF NOT EXISTS enrol_code TEXT",
     "ALTER TABLE instance ADD COLUMN IF NOT EXISTS enrol_expires TIMESTAMPTZ",
+    # The code a rotation replaced, honoured until its own expiry, so a command
+    # copied just before the Setup page rotated still works.
+    "ALTER TABLE instance ADD COLUMN IF NOT EXISTS enrol_prev_code TEXT",
+    "ALTER TABLE instance ADD COLUMN IF NOT EXISTS enrol_prev_expires TIMESTAMPTZ",
     # Sizes recorded when files are written, so listing the library does not
     # walk the filesystem once per book on every poll.
     "ALTER TABLE jobs ADD COLUMN IF NOT EXISTS output_bytes BIGINT",
@@ -253,6 +257,16 @@ def auth_status():
 SESSION_COOKIE = "vocalis_session"
 
 
+def _client_scheme(request: Request) -> str:
+    """The scheme the browser used, as the proxy in front reports it.
+
+    The first entry when a chain of proxies has sent a list, and this request's
+    own scheme when there is no proxy at all.
+    """
+    forwarded = request.headers.get("x-forwarded-proto", "")
+    return forwarded.split(",")[0].strip().lower() or request.url.scheme
+
+
 def _issue_session(request: Request) -> JSONResponse:
     """Hand back the session as a cookie rather than a token for the page to
     hold.
@@ -272,7 +286,7 @@ def _issue_session(request: Request) -> JSONResponse:
         samesite="lax",
         # Only over TLS, where there is TLS. Setting it unconditionally would
         # make the cookie silently unusable on a plain-HTTP LAN install.
-        secure=request.headers.get("x-forwarded-proto", request.url.scheme) == "https",
+        secure=_client_scheme(request) == "https",
         path="/",
     )
     return response
@@ -1327,10 +1341,7 @@ def _public_api_url(request: Request) -> str:
         # redirects. Small requests survive a redirect; a POST does not. The
         # server answers 301 and closes while the narrator is still sending,
         # and a finished audiobook dies as "Broken pipe" after hours of work.
-        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-        # A proxy chain can send a list; the first entry is the client's.
-        scheme = scheme.split(",")[0].strip() or request.url.scheme
-        return f"{scheme}://{host}"
+        return f"{_client_scheme(request)}://{host}"
     # No Host header at all (a bare HTTP/1.0 client); fall back to the address
     # the worker is already told to reach Postgres on.
     return f"http://{WORKER_DB_HOSTPORT.split(':')[0]}:{WEB_PORT}"
@@ -1359,13 +1370,13 @@ def worker_status(request: Request):
         # Quoted: zsh is the default shell on macOS and treats '?' as a glob,
         # so an unquoted URL with a query string fails with "no matches found"
         # before curl is ever reached.
-        # A fresh enrolment code each time this page is opened, good for half
-        # an hour. Not the worker token: that one authenticates the narrator
-        # itself and must never travel in a URL, where every proxy in the path
-        # writes it to a log.
+        # An enrolment code that stays the same across polls and is good for at
+        # least ten more minutes. Not the worker token: that one authenticates
+        # the narrator itself and must never travel in a URL, where every
+        # proxy in the path writes it to a log.
         "install_command": (
             f'curl -fsSL "{_public_api_url(request)}'
-            f'/api/worker/install?key={mint_enrolment()}" | sh'
+            f'/api/worker/install?key={current_enrolment()}" | sh'
         ),
     }
 
