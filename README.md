@@ -347,27 +347,46 @@ the worker runs a short probe (`identity.refresh()`): on CUDA it reads
 `torch.cuda.mem_get_info()`; on MPS, which exposes no such query, it allocates
 0.5 GB blocks under the renderers' own ceiling until Metal refuses, then frees
 them. That takes under a second and yields real headroom. `safe_concurrency()`
-divides it by the measured per-process peak, holding back
+divides it by what one process reaches by the *end* of its life, holding back
 `GPU_SAFETY_MARGIN_GB` so the desktop can grow mid-book.
 
-The difference is not academic: with a browser and editor open, one 24 GB Mac
-measured ~6 GB free and ran a chapter at a time; with them closed it measured
-16.0 GB and ran two. The Setup page shows the number and says so, because
-quitting a browser before a long book is a real and otherwise invisible lever.
-Per job rather than at startup, since a reading taken at login says nothing
-about conditions hours later.
+**The per-process figure has to be the end of life, not the start.** It was
+the start: 5.5 GB, the live tensors PyTorch reports. But Metal compiles a graph
+for every new chunk shape and keeps it, and that cache lives outside PyTorch's
+allocator — `torch.mps` never sees it, `empty_cache()` never frees it, and it
+surfaces only as an OOM's "other allocations". Measured directly from the
+kernel, one render process held **19 GB at 22 chunks** — 10 GB of GPU
+allocations plus 7.5 GB of CPU heap — while `torch.mps` reported a flat 3.0 GB
+the whole time.
+
+So a quiet 24 GB Mac measuring 16 GB free used to run two processes, each of
+which then grew toward 10 GB under a 16.3 GB ceiling they shared. One book died
+an hour and forty-eight minutes in, with the machine at 15.5 of 16 GB of swap.
+At the true figure a 24 GB Mac runs one at a time. Per job rather than at
+startup, since a reading taken at login says nothing about conditions hours
+later.
 
 The overhead and minimum are set from real OOM reports, not guesses, and the
 first guesses were too low. A process holds ~1.5 GB of non-pool GPU memory
 (model weights), and a single chunk of a long chapter reaches ~5.4 GB of live
 pool memory — so a process needs ~8 GB to be safe, not the 7 GB first assumed,
 and the overhead is 2.5 GB, not 1 GB. The practical consequence: **a 24 GB Mac
-runs one chapter at a time** (13.5 GB budget); 32 GB runs two, 48 GB three.
-Two long chapters two-up on a 24 GB Mac genuinely does not fit, however
-appealing the parallelism — the earlier "two" was optimism the hardware
-refused. Chunk size is also capped at 300 characters so no single chunk spikes
-toward the ceiling. A chapter that still OOMs is retried once after
-`empty_cache()` before the job is failed.
+runs one chapter at a time.** Two long chapters two-up on a 24 GB Mac
+genuinely does not fit, however appealing the parallelism. Chunk size is also
+capped at 300 characters so no single chunk spikes toward the ceiling.
+
+A render process is recycled after every segment (20 chunks), because a
+restart is the only thing that clears the graph cache. A reload measured 15
+seconds, so this costs roughly 5% on a long book.
+
+**Running out of GPU memory no longer fails the book.** It used to be retried
+once inside the same process after `empty_cache()` — which could never work,
+since what had filled the device was the graph cache that call does not touch.
+Now the pool is torn down and rebuilt, a process lighter if there was more than
+one, and given only the segments not yet on disk; nothing is narrated twice.
+It gives up only when fresh processes, one at a time, cannot finish a single
+segment — at which point the rest of the Mac is holding the memory, and the
+job says so: close other apps and resume.
 
 The output is unaffected: every chunk re-seeds with the job's fixed seed and
 the same reference clip, so a chapter renders identically regardless of which

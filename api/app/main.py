@@ -227,7 +227,7 @@ WORKER_DB_HOSTPORT = os.environ.get("WORKER_DB_HOSTPORT", "127.0.0.1:5445")
 # The narrator revision this server expects — see identity.REVISION in the
 # worker. A narrator below it is out of date, and the UI says so rather than
 # letting features go missing without explanation.
-REQUIRED_WORKER_REVISION = 3
+REQUIRED_WORKER_REVISION = 4
 
 # A worker whose heartbeat is older than this reads as offline. Comfortably
 # above the worker's poll interval so a busy narrator is never called dead.

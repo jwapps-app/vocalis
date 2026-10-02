@@ -34,7 +34,11 @@ from . import config
 #   2  records chunk timings, enabling read-along and chapter marks
 #   3  times individual words, so the reader can follow the voice word
 #      by word rather than sentence by sentence
-REVISION = 3
+#   4  budgets GPU for a process's whole life and survives running out of it.
+#      Not a feature the server builds on, but an older narrator runs two
+#      processes on a 24 GB Mac and fails long books hours in, which is worth
+#      the Setup page saying so.
+REVISION = 4
 
 log = logging.getLogger(__name__)
 
@@ -133,7 +137,7 @@ def refresh() -> dict:
     conditions when a book actually starts.
     """
     global _cached
-    from .pool import safe_concurrency
+    from .pool import capacity
 
     probe = _probe_device()
     _cached = {
@@ -142,7 +146,9 @@ def refresh() -> dict:
         "version": platform.platform(terse=True),
         "revision": REVISION,
         **probe,
-        "max_concurrency": safe_concurrency(99, probe.get("free_gpu_gb")),
+        # A question, not a request: asking safe_concurrency for 99 processes
+        # used to log a warning that 99 would not fit on every single start.
+        "max_concurrency": capacity(probe.get("free_gpu_gb"))[0],
     }
     free = _cached.get("free_gpu_gb")
     log.info(

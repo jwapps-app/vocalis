@@ -26,7 +26,7 @@ from vocalis_core.text_clean import clean_text, chunk_text
 from . import config
 from .assemble import assemble_m4b
 from .identity import describe, refresh
-from .pool import Cancelled, ChapterPool, cached_seconds
+from .pool import Cancelled, ChapterPool, cached_seconds, out_of_gpu_memory
 from . import transport
 
 log = logging.getLogger("vocalis.worker")
@@ -437,6 +437,58 @@ def build_timeline(chapters, segments, seg_seconds, seg_timings, work_dir) -> di
     return {"chapters": book_chapters, "chunks": book_chunks}
 
 
+# How many fresh starts in a row may fail to finish a single segment before the
+# job gives up. A start that gets anything done resets the count.
+_OOM_ATTEMPTS = 3
+
+
+def _render_surviving_oom(todo, concurrency, free_gpu_gb, on_done, cancelled,
+                          seg_seconds) -> None:
+    """Render every segment, starting over in fresh processes if the GPU fills.
+
+    Running out of GPU memory partway through a book used to fail the whole
+    job. The memory that runs out is Metal's compiled-graph cache, which only a
+    new process clears — so retrying inside the process that filled it, as the
+    pool once did, could never succeed. Here the pool is torn down and rebuilt,
+    a process lighter if there was more than one, and given only what is not
+    yet on disk. Finished segments are kept, so nothing is narrated twice.
+
+    It stops only when fresh processes, one at a time, still cannot finish a
+    single segment: at that point the rest of the Mac is holding the memory,
+    and saying so is more useful than trying forever.
+    """
+    stuck = 0
+    while True:
+        remaining = [task for task in todo if task[0] not in seg_seconds]
+        if not remaining:
+            return
+        before = len(seg_seconds)
+        pool = ChapterPool(concurrency, free_gpu_gb)
+        try:
+            with pool:
+                pool.render(remaining, on_done, cancelled)
+            return
+        except Exception as exc:
+            if not out_of_gpu_memory(exc):
+                raise
+            progressed = len(seg_seconds) > before
+            stuck = 0 if progressed else stuck + 1
+            if pool.concurrency == 1 and stuck >= _OOM_ATTEMPTS:
+                raise RuntimeError(
+                    "The GPU ran out of memory even narrating one segment at a "
+                    "time in a fresh process, so the rest of the Mac is holding "
+                    "it. Close other apps and resume — everything already "
+                    "narrated is kept."
+                ) from exc
+            concurrency = max(1, pool.concurrency - 1)
+            log.warning(
+                "Ran out of GPU memory with %d process(es); %d segment(s) done, "
+                "%d left. Starting fresh with %d.",
+                pool.concurrency, len(seg_seconds), len(remaining) - (len(seg_seconds) - before),
+                concurrency,
+            )
+
+
 def process_job(conn: psycopg.Connection, job) -> None:
     job_id = job["id"]
     is_sample = job["mode"] == "sample"
@@ -606,8 +658,8 @@ def process_job(conn: psycopg.Connection, job) -> None:
                 work_seconds=work_base + elapsed,
             )
 
-        with ChapterPool(concurrency, free_gpu_gb) as pool:
-            pool.render(todo, on_done, cancelled)
+        _render_surviving_oom(todo, concurrency, free_gpu_gb, on_done,
+                              cancelled, seg_seconds)
 
     update(conn, job_id, status="assembling", progress=SYNTH_DONE)
     # ffmpeg concatenates the segments in order, so a chapter's mark spans the

@@ -75,17 +75,36 @@ log = logging.getLogger(__name__)
 # the device maximum and left alone.
 DEVICE_CEILING_FRACTION = 0.92
 
-# Headroom a rendering process needs, measured: ~3 GB live, ~6.7 GB reserved.
-# Used to decide how many will fit in RAM — not to set the ceiling.
-PROCESS_FOOTPRINT_GB = 7.0
+# Total memory one render process commits by the end of its life — GPU and CPU
+# together, since on Apple Silicon they are the same RAM. Used to decide how
+# many fit in RAM, not to set the GPU ceiling.
+#
+# Measured, not inferred from PyTorch: the process's own footprint read from
+# the kernel was 19 GB after 22 chunks (10 GB of GPU allocations plus 7.5 GB of
+# CPU heap — Metal's compiled graphs live in both), and 22 GB a chunk later,
+# while torch.mps reported a flat 3.0 GB throughout. The old figure of 7 GB was
+# PyTorch's own number and missed most of it, which is how two processes were
+# allowed onto a 24 GB Mac and drove it to 15.5 of 16 GB of swap.
+PROCESS_FOOTPRINT_GB = 19.0
 
 # Left free for macOS and everything else when deciding concurrency. Applies to
 # system RAM, which is a real per-process cost, unlike the GPU ceiling above.
 SYSTEM_RESERVE_GB = 8.0
 
-# GPU allocation one render process peaks at, from real OOM reports (4.0–5.4 GB
-# of live pool memory on the longest chapters).
-PROCESS_GPU_GB = 5.5
+# GPU allocation one render process reaches by the end of its life.
+#
+# This was 5.5 GB — the live tensors from OOM reports — which is the *start* of
+# a process's life, not the end. Metal's graph cache grows with every new chunk
+# shape until the process is recycled, and that growth is exactly what the OOM
+# message calls "other allocations". Measured on a real book: 10 GB of GPU
+# allocations at 22 chunks, against 3.0 GB that PyTorch itself reported.
+#
+# Budgeting the start of life let two processes onto a device with a 16.3 GB
+# ceiling; each then grew toward ~10 GB and they met in the middle, one hour and
+# forty-eight minutes into a book. At the true figure a 24 GB Mac runs one at a
+# time — which is what this file's own notes concluded before the measurement
+# path started ignoring them.
+PROCESS_GPU_GB = 10.0
 
 # Fallback for when free GPU cannot be measured. Observed climbing from 1.5 GB
 # on a quiet machine to 9.5 GB with a browser, editor and chat app open; the
@@ -112,10 +131,18 @@ GPU_SAFETY_MARGIN_GB = 2.5
 # Counted in segments rather than chapters on purpose: a chapter is not a
 # bounded amount of work. A 40k-character chapter is ~133 chunks and would
 # exhaust the cache by itself, long before a per-chapter recycle could fire.
-# Segments are a fixed chunk count (config.SEGMENT_CHUNKS), so 2 per process
-# caps a process at ~40 chunks against a measured ~73-chunk ceiling, whatever
-# the book's chapter length.
-SEGMENTS_PER_PROCESS = 2
+# Segments are a fixed chunk count (config.SEGMENT_CHUNKS), so one per process
+# caps a process at 20 chunks whatever the book's chapter length.
+#
+# This was two — forty chunks — against a ~73-chunk ceiling measured with one
+# process and a quiet desktop. A fresh measurement reached 12 GB of GPU in 23
+# chunks, which leaves no room for forty under a 16.3 GB device ceiling that the
+# rest of the Mac shares. PROCESS_GPU_GB above is the footprint at twenty, so
+# the two numbers have to move together.
+#
+# The cost is a model reload per segment: 15 seconds measured, so roughly 5% on
+# a long book. Against failing nine hours in, that is cheap.
+SEGMENTS_PER_PROCESS = 1
 
 # Apple Silicon reports recommendedMaxWorkingSetSize at ~0.74x physical RAM,
 # and the watermark env vars are ratios of that. They must be set before the
@@ -133,6 +160,25 @@ def device_ceiling_gb() -> float:
     return _RECOMMENDED_MAX_FRACTION * physical_memory_gb() * DEVICE_CEILING_FRACTION
 
 
+def capacity(free_gpu_gb: float | None = None) -> tuple[int, str, float, int, int]:
+    """How many render processes this machine can hold, and why.
+
+    Returns (allowed, basis, headroom_gb, by_ram, by_gpu). Separate from
+    safe_concurrency so that asking the question does not log a complaint:
+    the heartbeat asks it on every start, and used to do so by requesting 99
+    processes and warning that 99 would not fit.
+    """
+    by_ram = int((physical_memory_gb() - SYSTEM_RESERVE_GB) // PROCESS_FOOTPRINT_GB)
+    if free_gpu_gb is None:
+        headroom = device_ceiling_gb() - OTHER_APPS_GPU_GB
+        basis = "assumed"
+    else:
+        headroom = free_gpu_gb - GPU_SAFETY_MARGIN_GB
+        basis = "measured"
+    by_gpu = int(headroom // PROCESS_GPU_GB)
+    return max(1, min(by_ram, by_gpu)), basis, headroom, by_ram, by_gpu
+
+
 def safe_concurrency(requested: int, free_gpu_gb: float | None = None) -> int:
     """Clamp requested concurrency to what this machine can actually hold.
 
@@ -144,15 +190,7 @@ def safe_concurrency(requested: int, free_gpu_gb: float | None = None) -> int:
     assuming a busy desktop, which is safe but wastes an idle machine.
     """
     requested = max(1, requested)
-    by_ram = int((physical_memory_gb() - SYSTEM_RESERVE_GB) // PROCESS_FOOTPRINT_GB)
-    if free_gpu_gb is None:
-        headroom = device_ceiling_gb() - OTHER_APPS_GPU_GB
-        basis = "assumed"
-    else:
-        headroom = free_gpu_gb - GPU_SAFETY_MARGIN_GB
-        basis = "measured"
-    by_gpu = int(headroom // PROCESS_GPU_GB)
-    allowed = max(1, min(by_ram, by_gpu))
+    allowed, basis, headroom, by_ram, by_gpu = capacity(free_gpu_gb)
     if requested > allowed:
         log.warning(
             "Concurrency %d exceeds capacity (RAM allows %d; %s GPU headroom"
@@ -210,23 +248,29 @@ def _render(args):
             params=params, trailing_pause=trailing_pause,
         )
     except RuntimeError as exc:
-        if "out of memory" not in str(exc).lower():
-            raise
-        # An unlucky long chapter can outgrow the ceiling while the rest of the
-        # desktop holds GPU memory. Drop the cache and try once more before
-        # failing a job that may already be hours in.
-        #
-        # Log the allocator's own numbers: a retry that swallows them leaves no
-        # way to tell "this process is using too much" from "everything else on
-        # the Mac is", which are opposite fixes.
-        log.warning("Chapter %d ran out of GPU memory; retrying once — %s", index, exc)
-        release()
-        duration, timings = _synth.synth_chapter(
-            chunks, Path(voice_ref) if voice_ref else None, seed, Path(out_path),
-            params=params, trailing_pause=trailing_pause,
-        )
+        if out_of_gpu_memory(exc):
+            # Not retried here. This used to empty the cache and try again in
+            # the same process, but what fills the device is Metal's compiled
+            # graph cache, which empty_cache() never touches — so the retry
+            # met exactly the wall the first attempt had, every time. The job
+            # rebuilds the pool instead, and a fresh process starts with an
+            # empty cache.
+            #
+            # The allocator's own numbers are worth keeping: they are the only
+            # way to tell "this process is too big" from "the rest of the Mac
+            # is", which call for opposite fixes. `index` is a (chapter,
+            # segment) pair, so it is formatted with %s — a %d here raised
+            # inside the warning itself, and this message never once reached
+            # the log.
+            log.warning("Segment %s ran out of GPU memory — %s", index, exc)
+        raise
     release()
     return index, duration, timings
+
+
+def out_of_gpu_memory(exc: BaseException) -> bool:
+    """Whether an exception is the GPU running out of room, on any backend."""
+    return "out of memory" in str(exc).lower()
 
 
 def cached_seconds(path: Path) -> float | None:
@@ -268,12 +312,10 @@ class ChapterPool:
             self.concurrency, device_ceiling_gb(),
         )
         ctx = multiprocessing.get_context("spawn")
-        # maxtasksperchild recycles a worker after this many chapters, reloading
-        # the model fresh. Belt to inference_mode's braces: if any GPU memory
-        # still creeps up across chapters, a bounded process lifetime caps it
-        # instead of letting it run to an OOM 20 chapters into a book. The cost
-        # is one model reload (~75s) per recycle, cheap against re-narrating a
-        # failed book. Kept high enough that most books never trigger it.
+        # maxtasksperchild recycles a worker after SEGMENTS_PER_PROCESS
+        # segments, reloading the model fresh — the only thing that clears
+        # Metal's graph cache. A reload measured 15 seconds with the weights
+        # already on disk.
         self._pool = ctx.Pool(
             processes=self.concurrency,
             initializer=_init_worker,
